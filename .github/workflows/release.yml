@@ -36,3 +36,30 @@ jobs:
         with:
           files: dsh-session-drafts.tgz
           generate_release_notes: true
+
+  # npm trusted publishing (OIDC): no stored tokens, no 2FA prompt — the
+  # registry verifies the workflow's identity token against the publisher
+  # registered on npmjs.com (Account Settings → Publishing access → Add
+  # trusted publisher: repository ne-ilyxa/dsh-session-drafts, workflow
+  # release.yml, environment release). Until that one-time registration
+  # exists this job fails harmlessly and can be re-run after setup.
+  publish-npm:
+    needs: release
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - run: npm publish --provenance --access public

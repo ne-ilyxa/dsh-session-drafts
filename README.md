@@ -22,6 +22,18 @@ dsh plugin --profile web add @ne-ilyxa/dsh-session-drafts
 
 Then restart the DSH web host (a profile boot composes the client bundle into the boot graph; hot activation is not attempted by this plugin).
 
+### Release channels
+
+- **npm** — `@ne-ilyxa/dsh-session-drafts`; published from CI via [trusted publishing (OIDC)](https://docs.npmjs.com/publishing-packages/publishing-with-trusted-publishing): no stored tokens, no 2FA prompts. Pushing a `v*` tag runs [release.yml](.github/workflows/release.yml): tests → prebuilt tarball attached to the GitHub Release → `npm publish --provenance`. The one-time setup is on npmjs.com: Account Settings → Publishing access → Add trusted publisher (repository `ne-ilyxa/dsh-session-drafts`, workflow `release.yml`, environment `release`).
+- **Prebuilt tarball** — every GitHub Release carries `dsh-session-drafts.tgz` (built by `prepack`, installable without npm and without pnpm's `allowBuilds` build approval).
+
+## Keyboard shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+Alt+N` | Mint a fresh draft from anywhere (works with zero drafts too) |
+| `Ctrl+Alt+D` | Open / close the Drafts popover |
+
 ## Verify it works
 
 1. Click **New Session** twice — two empty chats now coexist (watch the Drafts count go up; no reuse jump).
