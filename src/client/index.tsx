@@ -308,8 +308,12 @@ export function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode {
   const [position, setPosition] = useState<{ left: number; top: number } | null>(null)
 
   // Drafts appearing/disappearing retimes the rows and re-anchors an open panel.
+  // The immediate setNow on open is the fix for stale ages: `now` initializes at
+  // trigger mount (≈ the first draft's creation time), so rows rendered from a
+  // later open would diff against the mount time and forever read "now".
   useEffect(() => {
     if (!open) return
+    setNow(Date.now())
     const timer = setInterval(() => { setNow(Date.now()) }, 60_000)
     return () => { clearInterval(timer) }
   }, [open])
