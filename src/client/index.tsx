@@ -99,6 +99,40 @@ interface ClientContextLike {
 }
 
 // ---------------------------------------------------------------------------
+// Hotkeys (pure matcher, exported for tests).
+// ---------------------------------------------------------------------------
+
+/** Minimal keyboard-event shape the hotkey matcher reads. */
+export interface HotkeyEventLike {
+  readonly key: string
+  readonly ctrlKey: boolean
+  readonly altKey: boolean
+  readonly metaKey: boolean
+  readonly shiftKey: boolean
+  readonly target?: { readonly tagName?: string; readonly isContentEditable?: boolean } | null | undefined
+}
+
+/**
+ * Match the drafts hotkeys: Ctrl+Alt+N mints a new draft, Ctrl+Alt+D toggles
+ * the popover. Ctrl+Alt avoids the browser's own single-modifier shortcuts
+ * (Alt+D focuses the address bar on Windows Chrome, Ctrl+N opens a window).
+ * Keystrokes aimed at an editable surface (the composer, inputs) are left to
+ * that surface. Returns the action, or null when the event is not ours.
+ */
+export function matchDraftsHotkey(event: HotkeyEventLike): 'new' | 'toggle' | null {
+  if (!event.ctrlKey || !event.altKey || event.metaKey || event.shiftKey) return null
+  const target = event.target
+  if (target !== null && target !== undefined
+    && (target.isContentEditable === true
+      || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
+      || target.tagName === 'SELECT')) return null
+  const key = event.key.toLowerCase()
+  if (key === 'n') return 'new'
+  if (key === 'd') return 'toggle'
+  return null
+}
+
+// ---------------------------------------------------------------------------
 // Pure draft derivation (exported for tests; no React, no context).
 // ---------------------------------------------------------------------------
 
@@ -251,7 +285,7 @@ const STYLE_ID = '@ne-ilyxa/dsh-session-drafts'
 
 const en = {
   trigger: 'Drafts',
-  triggerLabel: 'Chat drafts ({n})',
+  triggerLabel: 'Chat drafts ({n}) — Ctrl+Alt+D',
   header: 'Drafts',
   rowTitle: 'New Session',
   discard: 'Discard draft',
@@ -266,7 +300,7 @@ const en = {
 
 const zh = {
   trigger: '草稿',
-  triggerLabel: '聊天草稿（{n}）',
+  triggerLabel: '聊天草稿（{n}）— Ctrl+Alt+D',
   header: '草稿',
   rowTitle: '新会话',
   discard: '丢弃草稿',
@@ -317,6 +351,29 @@ export function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode {
     const timer = setInterval(() => { setNow(Date.now()) }, 60_000)
     return () => { clearInterval(timer) }
   }, [open])
+
+  // Global hotkeys: Ctrl+Alt+N mints a fresh draft from anywhere (works with
+  // zero drafts too — the trigger hides, the hotkey must not), Ctrl+Alt+D
+  // toggles the popover. Registered before the zero-drafts null return, so
+  // the listener lives whenever the sidebar footer does.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      // DOM EventTarget is opaque to the structural matcher (tagName lives on
+      // Element); the cast is the documented seam — the matcher narrows safely.
+      const action = matchDraftsHotkey(event as unknown as HotkeyEventLike)
+      if (action === null) return
+      event.preventDefault()
+      event.stopPropagation()
+      if (action === 'new') {
+        setOpen(false)
+        startSession()
+      } else {
+        setOpen(current => !current)
+      }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('keydown', onKey) }
+  }, [startSession])
 
   // Anchor the panel above the trigger (the foot sits at the viewport bottom),
   // falling below only when there is no room; re-run on scroll/resize.

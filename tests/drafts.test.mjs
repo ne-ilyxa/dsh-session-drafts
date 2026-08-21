@@ -130,6 +130,25 @@ test('draftAge buckets relative time', async () => {
   assert.deepEqual(plain(plugin.draftAge(now - 2 * 86_400_000, now)), { key: 'day', n: 2 })
 })
 
+test('matchDraftsHotkey matches only Ctrl+Alt+N/D and skips editables', async () => {
+  const plugin = await loadPlugin()
+  const ev = (key, over = {}) => ({
+    key, ctrlKey: false, altKey: false, metaKey: false, shiftKey: false, target: null, ...over,
+  })
+  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true })), 'new')
+  assert.equal(plugin.matchDraftsHotkey(ev('d', { ctrlKey: true, altKey: true })), 'toggle')
+  assert.equal(plugin.matchDraftsHotkey(ev('D', { ctrlKey: true, altKey: true })), 'toggle')
+  // Not ours: single modifiers, extra modifiers, other keys.
+  assert.equal(plugin.matchDraftsHotkey(ev('n', { altKey: true })), null)
+  assert.equal(plugin.matchDraftsHotkey(ev('d', { ctrlKey: true })), null)
+  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, shiftKey: true })), null)
+  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, metaKey: true })), null)
+  assert.equal(plugin.matchDraftsHotkey(ev('q', { ctrlKey: true, altKey: true })), null)
+  // Editable targets keep their keystrokes (the composer owns typing).
+  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, target: { tagName: 'TEXTAREA' } })), null)
+  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, target: { isContentEditable: true } })), null)
+})
+
 test('installFreshSessions patches startSession to always create a fresh session', async () => {
   const plugin = await loadPlugin()
   const created = []

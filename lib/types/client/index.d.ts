@@ -85,6 +85,26 @@ interface ClientContextLike {
     readonly locale: LocaleLike;
     effect(setup: () => (() => void) | void, label?: string): (() => void) | void;
 }
+/** Minimal keyboard-event shape the hotkey matcher reads. */
+export interface HotkeyEventLike {
+    readonly key: string;
+    readonly ctrlKey: boolean;
+    readonly altKey: boolean;
+    readonly metaKey: boolean;
+    readonly shiftKey: boolean;
+    readonly target?: {
+        readonly tagName?: string;
+        readonly isContentEditable?: boolean;
+    } | null | undefined;
+}
+/**
+ * Match the drafts hotkeys: Ctrl+Alt+N mints a new draft, Ctrl+Alt+D toggles
+ * the popover. Ctrl+Alt avoids the browser's own single-modifier shortcuts
+ * (Alt+D focuses the address bar on Windows Chrome, Ctrl+N opens a window).
+ * Keystrokes aimed at an editable surface (the composer, inputs) are left to
+ * that surface. Returns the action, or null when the event is not ours.
+ */
+export declare function matchDraftsHotkey(event: HotkeyEventLike): 'new' | 'toggle' | null;
 /** One switchable draft row projected for the popover. */
 export interface DraftRow {
     readonly id: string;
