@@ -394,20 +394,6 @@ export function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode {
   // null return, so the listener lives whenever the sidebar footer does.
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      // Diagnostics for every Ctrl+Alt press: one console line carries the
-      // exact event shape (layout-dependent key, physical code, modifier
-      // quirks), so a hotkey that dies against an unknown environment quirk
-      // is diagnosable from the user's console without a debugger.
-      if (event.ctrlKey && event.altKey && !event.metaKey) {
-        console.info('[session-drafts hk]', JSON.stringify({
-          key: event.key,
-          code: event.code,
-          shift: event.shiftKey,
-          composing: event.isComposing === true,
-          altGraph: event.getModifierState?.('AltGraph') ?? null,
-          keyCode: event.keyCode,
-        }))
-      }
       // DOM EventTarget is opaque to the structural matcher (tagName lives on
       // Element); the cast is the documented seam — the matcher narrows safely.
       const action = matchDraftsHotkey(event as unknown as HotkeyEventLike)
@@ -421,7 +407,6 @@ export function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode {
         setOpen(current => !current)
       }
     }
-    console.info('[session-drafts] hotkeys armed: Ctrl+Alt+N — new draft, Ctrl+Alt+D — toggle Drafts')
     window.addEventListener('keydown', onKey, true)
     return () => { window.removeEventListener('keydown', onKey, true) }
   }, [startSession])
