@@ -1,5 +1,7 @@
 # dsh-session-drafts
 
+[![CI](https://github.com/ne-ilyxa/dsh-session-drafts/actions/workflows/ci.yml/badge.svg)](https://github.com/ne-ilyxa/dsh-session-drafts/actions/workflows/ci.yml)
+
 Cursor-style **New Session** for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH): every click mints a **fresh durable blank session** — persisted in Session persistence before the first message is ever sent — so you can keep several empty chats open at once, exactly like Cursor's new-chat tabs.
 
 The stock web shell reuses a workspace's single blank session (one empty chat per workspace, silently). This plugin removes that cap and adds a sidebar **Drafts** switcher to manage the empties.
