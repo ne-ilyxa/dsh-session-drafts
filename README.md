@@ -26,6 +26,16 @@ Then restart the DSH web host (a profile boot composes the client bundle into th
 2. Open **Drafts** in the sidebar foot, switch between the empties, discard one with **×**.
 3. Host truth: each click produced a `session.create` — sessions survive a page refresh and the host restart.
 
+## Screenshots
+
+Three New Session clicks on one workspace — three independent durable drafts (plus the initial one), no reuse:
+
+![Drafts popover listing four blank sessions](assets/drafts-popover.png)
+
+Switching between drafts — the accent bar marks the current one:
+
+![Draft switched, current marker moved](assets/drafts-switched.png)
+
 ## Development
 
 ```bash
