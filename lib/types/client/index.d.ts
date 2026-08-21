@@ -111,8 +111,6 @@ export interface HotkeyEventLike {
     readonly shiftKey: boolean;
     /** True exactly while a real IME composition is open (not the legacy 229). */
     readonly isComposing?: boolean;
-    /** AltGraph detector (typing on European layouts rides Ctrl+Alt). */
-    getModifierState?(state: 'AltGraph'): boolean;
 }
 /**
  * Match the drafts hotkeys: Ctrl+Alt+N mints a new draft, Ctrl+Alt+D toggles
@@ -120,13 +118,13 @@ export interface HotkeyEventLike {
  * the keyboard layout, so a Russian layout yields 'т' for the N key and a
  * key-based matcher silently dies there. `event.key` stays as the fallback
  * for engines without codes. Ctrl+Alt avoids the browser's own
- * single-modifier shortcuts; AltGraph (Ctrl+Alt on European layouts, a
- * TYPING modifier) is explicitly excluded so composing characters never
- * mints drafts. An open IME composition is skipped too — but the legacy
- * keyCode-229-alone signal deliberately is NOT: under Linux IBus every
- * keydown of a layout switch carries 229, and honoring it would kill the
- * hotkeys entirely (the dsh-better-sidebar capture guard does exactly that
- * and must not be joined).
+ * single-modifier shortcuts; an open IME composition is skipped — but the
+ * legacy keyCode-229-alone signal deliberately is NOT (under Linux IBus every
+ * keydown of a layout switch carries 229). There is deliberately NO
+ * AltGraph guard: Firefox on Linux reports AltGraph=true for EVERY Ctrl+Alt
+ * combination (X11 maps AltGr to Ctrl+Alt), so such a guard — however
+ * well-meant for European layouts — kills the hotkeys for every Firefox user
+ * on Linux.
  */
 export declare function matchDraftsHotkey(event: HotkeyEventLike): 'new' | 'toggle' | null;
 /** One switchable draft row projected for the popover. */

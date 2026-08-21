@@ -144,10 +144,12 @@ test('matchDraftsHotkey matches physical codes (layout-independent) and guards A
   // No code (old engine): layout-dependent key falls back.
   assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true })), 'new')
   assert.equal(plugin.matchDraftsHotkey(ev('D', { ctrlKey: true, altKey: true })), 'toggle')
-  // AltGraph is a typing modifier on European layouts (rides Ctrl+Alt) — never ours.
-  assert.equal(plugin.matchDraftsHotkey(ev('q', {
-    ctrlKey: true, altKey: true, code: 'KeyQ', getModifierState: () => true,
-  })), null)
+  // Firefox on Linux reports AltGraph=true for EVERY Ctrl+Alt combination
+  // (X11 maps AltGr to Ctrl+Alt) — an AltGraph guard killed the hotkeys for
+  // every Firefox/Linux user, so it is deliberately absent.
+  assert.equal(plugin.matchDraftsHotkey(ev('n', {
+    ctrlKey: true, altKey: true, code: 'KeyN', getModifierState: () => true,
+  })), 'new')
   // An open IME composition is skipped; the legacy 229-alone signal is NOT
   // (Linux IBus stamps every keydown of a switched layout with it).
   assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, code: 'KeyN', isComposing: true })), null)

@@ -121,8 +121,6 @@ export interface HotkeyEventLike {
   readonly shiftKey: boolean
   /** True exactly while a real IME composition is open (not the legacy 229). */
   readonly isComposing?: boolean
-  /** AltGraph detector (typing on European layouts rides Ctrl+Alt). */
-  getModifierState?(state: 'AltGraph'): boolean
 }
 
 /**
@@ -131,18 +129,17 @@ export interface HotkeyEventLike {
  * the keyboard layout, so a Russian layout yields 'т' for the N key and a
  * key-based matcher silently dies there. `event.key` stays as the fallback
  * for engines without codes. Ctrl+Alt avoids the browser's own
- * single-modifier shortcuts; AltGraph (Ctrl+Alt on European layouts, a
- * TYPING modifier) is explicitly excluded so composing characters never
- * mints drafts. An open IME composition is skipped too — but the legacy
- * keyCode-229-alone signal deliberately is NOT: under Linux IBus every
- * keydown of a layout switch carries 229, and honoring it would kill the
- * hotkeys entirely (the dsh-better-sidebar capture guard does exactly that
- * and must not be joined).
+ * single-modifier shortcuts; an open IME composition is skipped — but the
+ * legacy keyCode-229-alone signal deliberately is NOT (under Linux IBus every
+ * keydown of a layout switch carries 229). There is deliberately NO
+ * AltGraph guard: Firefox on Linux reports AltGraph=true for EVERY Ctrl+Alt
+ * combination (X11 maps AltGr to Ctrl+Alt), so such a guard — however
+ * well-meant for European layouts — kills the hotkeys for every Firefox user
+ * on Linux.
  */
 export function matchDraftsHotkey(event: HotkeyEventLike): 'new' | 'toggle' | null {
   if (!event.ctrlKey || !event.altKey || event.metaKey || event.shiftKey) return null
   if (event.isComposing === true) return null
-  if (event.getModifierState?.('AltGraph') === true) return null
   const code = event.code
   if (code === 'KeyN') return 'new'
   if (code === 'KeyD') return 'toggle'
@@ -397,6 +394,20 @@ export function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode {
   // null return, so the listener lives whenever the sidebar footer does.
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
+      // Diagnostics for every Ctrl+Alt press: one console line carries the
+      // exact event shape (layout-dependent key, physical code, modifier
+      // quirks), so a hotkey that dies against an unknown environment quirk
+      // is diagnosable from the user's console without a debugger.
+      if (event.ctrlKey && event.altKey && !event.metaKey) {
+        console.info('[session-drafts hk]', JSON.stringify({
+          key: event.key,
+          code: event.code,
+          shift: event.shiftKey,
+          composing: event.isComposing === true,
+          altGraph: event.getModifierState?.('AltGraph') ?? null,
+          keyCode: event.keyCode,
+        }))
+      }
       // DOM EventTarget is opaque to the structural matcher (tagName lives on
       // Element); the cast is the documented seam — the matcher narrows safely.
       const action = matchDraftsHotkey(event as unknown as HotkeyEventLike)
