@@ -12,6 +12,9 @@
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./lib/types/index.d.ts",
@@ -47,6 +50,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.client.json && node scripts/wrap-client.mjs",
     "check": "tsc -p tsconfig.json && pnpm run build && node --test tests/*.test.mjs",
+    "prepare": "pnpm run build",
     "prepack": "pnpm run build",
     "test": "pnpm run build && node --test tests/*.test.mjs"
   },
