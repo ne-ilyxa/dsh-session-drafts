@@ -119,6 +119,8 @@ export interface HotkeyEventLike {
   readonly altKey: boolean
   readonly metaKey: boolean
   readonly shiftKey: boolean
+  /** True exactly while a real IME composition is open (not the legacy 229). */
+  readonly isComposing?: boolean
   /** AltGraph detector (typing on European layouts rides Ctrl+Alt). */
   getModifierState?(state: 'AltGraph'): boolean
 }
@@ -131,11 +133,15 @@ export interface HotkeyEventLike {
  * for engines without codes. Ctrl+Alt avoids the browser's own
  * single-modifier shortcuts; AltGraph (Ctrl+Alt on European layouts, a
  * TYPING modifier) is explicitly excluded so composing characters never
- * mints drafts. Works inside editables on purpose: a Ctrl+Alt+letter is
- * never plain typing.
+ * mints drafts. An open IME composition is skipped too — but the legacy
+ * keyCode-229-alone signal deliberately is NOT: under Linux IBus every
+ * keydown of a layout switch carries 229, and honoring it would kill the
+ * hotkeys entirely (the dsh-better-sidebar capture guard does exactly that
+ * and must not be joined).
  */
 export function matchDraftsHotkey(event: HotkeyEventLike): 'new' | 'toggle' | null {
   if (!event.ctrlKey || !event.altKey || event.metaKey || event.shiftKey) return null
+  if (event.isComposing === true) return null
   if (event.getModifierState?.('AltGraph') === true) return null
   const code = event.code
   if (code === 'KeyN') return 'new'
@@ -381,8 +387,14 @@ export function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode {
 
   // Global hotkeys: Ctrl+Alt+N mints a fresh draft from anywhere (works with
   // zero drafts too — the trigger hides, the hotkey must not), Ctrl+Alt+D
-  // toggles the popover. Registered before the zero-drafts null return, so
-  // the listener lives whenever the sidebar footer does.
+  // toggles the popover. Registered on WINDOW in the CAPTURE phase: window is
+  // the first node of the event path, so no document/container handler can
+  // stopPropagation() the event away from us. That is not theoretical — the
+  // dsh-better-sidebar IME guard (document capture) calls stopPropagation on
+  // every keydown it believes is composition, and under Linux IBus layout
+  // switching that is EVERY keydown (keyCode 229), which silently killed
+  // bubble-phase listeners of any layout. Registered before the zero-drafts
+  // null return, so the listener lives whenever the sidebar footer does.
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       // DOM EventTarget is opaque to the structural matcher (tagName lives on
@@ -398,8 +410,9 @@ export function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode {
         setOpen(current => !current)
       }
     }
-    document.addEventListener('keydown', onKey)
-    return () => { document.removeEventListener('keydown', onKey) }
+    console.info('[session-drafts] hotkeys armed: Ctrl+Alt+N — new draft, Ctrl+Alt+D — toggle Drafts')
+    window.addEventListener('keydown', onKey, true)
+    return () => { window.removeEventListener('keydown', onKey, true) }
   }, [startSession])
 
   // Anchor the panel above the trigger (the foot sits at the viewport bottom),

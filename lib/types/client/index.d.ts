@@ -109,6 +109,8 @@ export interface HotkeyEventLike {
     readonly altKey: boolean;
     readonly metaKey: boolean;
     readonly shiftKey: boolean;
+    /** True exactly while a real IME composition is open (not the legacy 229). */
+    readonly isComposing?: boolean;
     /** AltGraph detector (typing on European layouts rides Ctrl+Alt). */
     getModifierState?(state: 'AltGraph'): boolean;
 }
@@ -120,8 +122,11 @@ export interface HotkeyEventLike {
  * for engines without codes. Ctrl+Alt avoids the browser's own
  * single-modifier shortcuts; AltGraph (Ctrl+Alt on European layouts, a
  * TYPING modifier) is explicitly excluded so composing characters never
- * mints drafts. Works inside editables on purpose: a Ctrl+Alt+letter is
- * never plain typing.
+ * mints drafts. An open IME composition is skipped too — but the legacy
+ * keyCode-229-alone signal deliberately is NOT: under Linux IBus every
+ * keydown of a layout switch carries 229, and honoring it would kill the
+ * hotkeys entirely (the dsh-better-sidebar capture guard does exactly that
+ * and must not be joined).
  */
 export declare function matchDraftsHotkey(event: HotkeyEventLike): 'new' | 'toggle' | null;
 /** One switchable draft row projected for the popover. */

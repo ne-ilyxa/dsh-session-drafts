@@ -148,6 +148,9 @@ test('matchDraftsHotkey matches physical codes (layout-independent) and guards A
   assert.equal(plugin.matchDraftsHotkey(ev('q', {
     ctrlKey: true, altKey: true, code: 'KeyQ', getModifierState: () => true,
   })), null)
+  // An open IME composition is skipped; the legacy 229-alone signal is NOT
+  // (Linux IBus stamps every keydown of a switched layout with it).
+  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, code: 'KeyN', isComposing: true })), null)
   // Not ours: single modifiers, extra modifiers, other keys.
   assert.equal(plugin.matchDraftsHotkey(ev('n', { altKey: true, code: 'KeyN' })), null)
   assert.equal(plugin.matchDraftsHotkey(ev('d', { ctrlKey: true, code: 'KeyD' })), null)

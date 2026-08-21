@@ -187,7 +187,17 @@ try {
     if ((await widget()).panel) { await clickSelector('.dsd-trigger'); await sleep(500) }
 
     // Hotkeys: Ctrl+Alt+N mints a draft (puppeteer sends physical codes,
-    // which is what the layout-independent matcher reads).
+    // which is what the layout-independent matcher reads). Before that,
+    // install a worst-case reproduction of the environment that killed the
+    // bubble-phase listener in the wild: a document-capture guard that
+    // stopPropagation()s unconditionally (dsh-better-sidebar's IME guard
+    // does exactly this under Linux IBus, where every keydown carries
+    // keyCode 229). The window-capture listener must still see the event.
+    await page.evaluate(() => {
+      const guard = event => { event.stopPropagation() }
+      document.addEventListener('keydown', guard, true)
+      document.addEventListener('keyup', guard, true)
+    })
     const beforeHotkey = await hostBlanks()
     await page.keyboard.down('Control'); await page.keyboard.down('Alt')
     await page.keyboard.press('KeyN')
