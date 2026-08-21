@@ -72,6 +72,13 @@ interface SessionsLike {
   create(opts: { workspaceId?: string; cwd?: string }): Promise<string>
   open(id: string): void
   clear(): void
+  /** Session scope for facade access (undefined until the session is opened). */
+  scope?(sessionId: string): unknown | undefined
+}
+
+/** Per-session composer input face (ui-conversation's conversation.input). */
+interface ConversationInputLike {
+  for(scope: unknown): { readonly state: { getSnapshot(): { readonly text: string } } }
 }
 
 /** The workspaces service face the patch and the widget use. */
@@ -95,6 +102,7 @@ interface ClientContextLike {
   readonly sessions: SessionsLike
   readonly workspaces: WorkspacesLike
   readonly locale: LocaleLike
+  readonly conversation: { readonly input: ConversationInputLike }
   effect(setup: () => (() => void) | void, label?: string): (() => void) | void
 }
 
@@ -199,6 +207,17 @@ export function draftAge(updatedAt: number, now: number): { key: 'now' | 'min' |
   if (diff < 3_600_000) return { key: 'min', n: Math.floor(diff / 60_000) }
   if (diff < 86_400_000) return { key: 'hour', n: Math.floor(diff / 3_600_000) }
   return { key: 'day', n: Math.floor(diff / 86_400_000) }
+}
+
+/**
+ * One-line preview of a draft's unsent composer text: whitespace collapsed,
+ * capped at {@link max} chars with an ellipsis. Blank input previews as
+ * undefined (nothing to show). Pure projection of InputState.text.
+ */
+export function draftPreview(text: string, max = 60): string | undefined {
+  const collapsed = text.replace(/\s+/g, ' ').trim()
+  if (collapsed === '') return undefined
+  return collapsed.length <= max ? collapsed : `${collapsed.slice(0, max).trimEnd()}…`
 }
 
 // ---------------------------------------------------------------------------
@@ -327,11 +346,13 @@ interface DraftsFooterActionProps {
   readonly startSession: () => void
   readonly openSession: (sessionId: string) => void
   readonly discardSession: (sessionId: string) => void
+  /** Raw unsent composer text of one draft (undefined when none/unopened). */
+  readonly draftPreviewOf: (sessionId: string) => string | undefined
 }
 
 /** Sidebar foot entry: drafts trigger + anchored popover switcher. */
 export function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode {
-  const { wide, useSessions, useWorkspaces, t, startSession, openSession, discardSession } = props
+  const { wide, useSessions, useWorkspaces, t, startSession, openSession, discardSession, draftPreviewOf } = props
   const sessions = useSessions(snapshot => snapshot)
   const workspaces = useWorkspaces(snapshot => snapshot)
   const drafts = selectDraftRows(sessions, workspaces)
@@ -438,6 +459,9 @@ export function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode {
     const when = age.key === 'now'
       ? t('timeNow')
       : t(`time${age.key === 'min' ? 'Min' : age.key === 'hour' ? 'Hour' : 'Day'}`, { n: age.n })
+    // Snapshot-at-render preview: only an opened session has a composer, and
+    // the popover is closed while its own draft is being typed into.
+    const preview = draftPreview(draftPreviewOf(draft.id) ?? '')
     return (
       <div
         key={draft.id}
@@ -452,6 +476,7 @@ export function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode {
         <span className="dsd-rowBody">
           <span className="dsd-rowTitle">{t('rowTitle')}</span>
           <span className="dsd-rowLabel">{draft.label}</span>
+          {preview !== undefined && <span className="dsd-rowPreview" title={preview}>{preview}</span>}
         </span>
         <span className="dsd-rowWhen">{when}</span>
         <button
@@ -523,7 +548,7 @@ export function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode {
 // ---------------------------------------------------------------------------
 
 /** Required services (cordis fiber inject). */
-export const inject = ['slots', 'sessions', 'workspaces', 'locale']
+export const inject = ['slots', 'sessions', 'workspaces', 'locale', 'conversation']
 
 /** Shared stylesheet, guarded by a stable data attribute across HMR loads. */
 const styles = `
@@ -545,6 +570,7 @@ const styles = `
 .dsd-rowBody{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
 .dsd-rowTitle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary);font-size:13px}
 .dsd-rowLabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font-size:11px}
+.dsd-rowPreview{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary);font-size:11px;font-style:italic}
 .dsd-rowWhen{flex:none;color:var(--dsw-alias-label-tertiary);font-size:11px}
 .dsd-current .dsd-rowTitle{color:var(--dsw-alias-label-brand)}
 .dsd-current::before{content:"";position:absolute;left:2px;top:10px;bottom:10px;width:3px;border-radius:2px;background:var(--dsw-alias-label-brand)}
@@ -589,6 +615,17 @@ export function apply(ctx: ClientContextLike): void {
           void ctx.workspaces.archiveSession(sessionId).catch((error: unknown) => {
             console.warn('[session-drafts] draft discard failed:', error)
           })
+        },
+        draftPreviewOf: (sessionId: string): string | undefined => {
+          // Only an opened session has a composer scope; anything else (or a
+          // runtime shape drift) previews as nothing rather than throwing.
+          try {
+            const scope = ctx.sessions.scope?.(sessionId)
+            if (scope === undefined) return undefined
+            return ctx.conversation.input.for(scope).state.getSnapshot().text
+          } catch {
+            return undefined
+          }
         },
       }),
       locale: NS,

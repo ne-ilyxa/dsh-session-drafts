@@ -61,6 +61,18 @@ interface SessionsLike {
     }): Promise<string>;
     open(id: string): void;
     clear(): void;
+    /** Session scope for facade access (undefined until the session is opened). */
+    scope?(sessionId: string): unknown | undefined;
+}
+/** Per-session composer input face (ui-conversation's conversation.input). */
+interface ConversationInputLike {
+    for(scope: unknown): {
+        readonly state: {
+            getSnapshot(): {
+                readonly text: string;
+            };
+        };
+    };
 }
 /** The workspaces service face the patch and the widget use. */
 interface WorkspacesLike {
@@ -83,6 +95,9 @@ interface ClientContextLike {
     readonly sessions: SessionsLike;
     readonly workspaces: WorkspacesLike;
     readonly locale: LocaleLike;
+    readonly conversation: {
+        readonly input: ConversationInputLike;
+    };
     effect(setup: () => (() => void) | void, label?: string): (() => void) | void;
 }
 /** Minimal keyboard-event shape the hotkey matcher reads. */
@@ -129,6 +144,12 @@ export declare function draftAge(updatedAt: number, now: number): {
     key: 'now' | 'min' | 'hour' | 'day';
     n: number;
 };
+/**
+ * One-line preview of a draft's unsent composer text: whitespace collapsed,
+ * capped at {@link max} chars with an ellipsis. Blank input previews as
+ * undefined (nothing to show). Pure projection of InputState.text.
+ */
+export declare function draftPreview(text: string, max?: number): string | undefined;
 /** Resolve the New Session target exactly like the stock policy (minus reuse). */
 export declare function resolveTargetWorkspaceId(workspaces: WorkspaceListLike, sessions: SessionListLike): string | undefined;
 /**
@@ -152,6 +173,8 @@ interface DraftsFooterActionProps {
     readonly startSession: () => void;
     readonly openSession: (sessionId: string) => void;
     readonly discardSession: (sessionId: string) => void;
+    /** Raw unsent composer text of one draft (undefined when none/unopened). */
+    readonly draftPreviewOf: (sessionId: string) => string | undefined;
 }
 /** Sidebar foot entry: drafts trigger + anchored popover switcher. */
 export declare function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode;

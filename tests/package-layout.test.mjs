@@ -19,6 +19,7 @@ test('package is a portable, prebuilt DSH Profile Bundle with a client half', as
       '@deepseek-ai/dsh-client-runtime',
       '@deepseek-ai/dsh-client-locale',
       '@deepseek-ai/dsh-client-ui-sidebar',
+      '@deepseek-ai/dsh-client-ui-conversation',
     ],
   })
   assert.equal(pkg.main, 'lib/index.js')

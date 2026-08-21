@@ -80,7 +80,7 @@ function workspacesFixture() {
 
 test('bundle declares the runtime services it needs', async () => {
   const plugin = await loadPlugin()
-  assert.deepEqual(JSON.parse(JSON.stringify(plugin.inject)), ['slots', 'sessions', 'workspaces', 'locale'])
+  assert.deepEqual(JSON.parse(JSON.stringify(plugin.inject)), ['slots', 'sessions', 'workspaces', 'locale', 'conversation'])
   assert.equal(typeof plugin.apply, 'function')
   assert.equal(typeof plugin.DraftsFooterAction, 'function')
 })
@@ -147,6 +147,16 @@ test('matchDraftsHotkey matches only Ctrl+Alt+N/D and skips editables', async ()
   // Editable targets keep their keystrokes (the composer owns typing).
   assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, target: { tagName: 'TEXTAREA' } })), null)
   assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, target: { isContentEditable: true } })), null)
+})
+
+test('draftPreview collapses whitespace and caps length', async () => {
+  const plugin = await loadPlugin()
+  assert.equal(plugin.draftPreview(''), undefined)
+  assert.equal(plugin.draftPreview('   \n\t  '), undefined)
+  assert.equal(plugin.draftPreview('  Рефакторинг\n  парсера  '), 'Рефакторинг парсера')
+  assert.equal(plugin.draftPreview('a'.repeat(60)), 'a'.repeat(60))
+  assert.equal(plugin.draftPreview('a'.repeat(61)), `${'a'.repeat(60)}…`)
+  assert.equal(plugin.draftPreview(`b`.repeat(100), 10), 'bbbbbbbbbb…')
 })
 
 test('installFreshSessions patches startSession to always create a fresh session', async () => {
