@@ -1,6 +1,6 @@
 {
   "name": "@ne-ilyxa/dsh-session-drafts",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Cursor-style New Session for DeepSeek Harness: every click mints a durable blank draft session (no reuse), with a sidebar drafts switcher",
   "repository": {
     "type": "git",
