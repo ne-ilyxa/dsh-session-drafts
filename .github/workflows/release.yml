@@ -1,0 +1,38 @@
+# Release: on a v* tag, build the package and attach the prebuilt tarball to
+# a GitHub Release. The tarball is the install path that needs neither npm
+# nor pnpm's allowBuilds build approval (see awesome-dsh-plugin's
+# contributing guide): storefronts offer it via the `tarball:` field.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check
+      - name: Pack prebuilt tarball
+        run: |
+          pnpm pack
+          TARBALL="$(basename "$(pwd)" | sed 's/^@ne-ilyxa\///')-$(node -p "require('./package.json').version").tgz"
+          mv "$TARBALL" dsh-session-drafts.tgz
+      - name: Create GitHub Release with the tarball
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dsh-session-drafts.tgz
+          generate_release_notes: true
