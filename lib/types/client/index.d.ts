@@ -69,7 +69,7 @@ interface ConversationInputLike {
     for(scope: unknown): {
         readonly state: {
             getSnapshot(): {
-                readonly text: string;
+                readonly draft?: string;
             };
         };
     };
@@ -103,21 +103,25 @@ interface ClientContextLike {
 /** Minimal keyboard-event shape the hotkey matcher reads. */
 export interface HotkeyEventLike {
     readonly key: string;
+    /** Layout-independent physical key ('KeyN', 'KeyD'); absent on old engines. */
+    readonly code?: string;
     readonly ctrlKey: boolean;
     readonly altKey: boolean;
     readonly metaKey: boolean;
     readonly shiftKey: boolean;
-    readonly target?: {
-        readonly tagName?: string;
-        readonly isContentEditable?: boolean;
-    } | null | undefined;
+    /** AltGraph detector (typing on European layouts rides Ctrl+Alt). */
+    getModifierState?(state: 'AltGraph'): boolean;
 }
 /**
  * Match the drafts hotkeys: Ctrl+Alt+N mints a new draft, Ctrl+Alt+D toggles
- * the popover. Ctrl+Alt avoids the browser's own single-modifier shortcuts
- * (Alt+D focuses the address bar on Windows Chrome, Ctrl+N opens a window).
- * Keystrokes aimed at an editable surface (the composer, inputs) are left to
- * that surface. Returns the action, or null when the event is not ours.
+ * the popover. Matching is by physical key code first — `event.key` follows
+ * the keyboard layout, so a Russian layout yields 'т' for the N key and a
+ * key-based matcher silently dies there. `event.key` stays as the fallback
+ * for engines without codes. Ctrl+Alt avoids the browser's own
+ * single-modifier shortcuts; AltGraph (Ctrl+Alt on European layouts, a
+ * TYPING modifier) is explicitly excluded so composing characters never
+ * mints drafts. Works inside editables on purpose: a Ctrl+Alt+letter is
+ * never plain typing.
  */
 export declare function matchDraftsHotkey(event: HotkeyEventLike): 'new' | 'toggle' | null;
 /** One switchable draft row projected for the popover. */

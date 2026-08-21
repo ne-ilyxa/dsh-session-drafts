@@ -130,23 +130,30 @@ test('draftAge buckets relative time', async () => {
   assert.deepEqual(plain(plugin.draftAge(now - 2 * 86_400_000, now)), { key: 'day', n: 2 })
 })
 
-test('matchDraftsHotkey matches only Ctrl+Alt+N/D and skips editables', async () => {
+test('matchDraftsHotkey matches physical codes (layout-independent) and guards AltGraph', async () => {
   const plugin = await loadPlugin()
   const ev = (key, over = {}) => ({
-    key, ctrlKey: false, altKey: false, metaKey: false, shiftKey: false, target: null, ...over,
+    key, code: undefined, ctrlKey: false, altKey: false, metaKey: false, shiftKey: false, ...over,
   })
+  // English layout: both code and key agree.
+  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, code: 'KeyN' })), 'new')
+  assert.equal(plugin.matchDraftsHotkey(ev('d', { ctrlKey: true, altKey: true, code: 'KeyD' })), 'toggle')
+  // Russian layout: event.key is 'т' for the physical N key — the code wins.
+  assert.equal(plugin.matchDraftsHotkey(ev('т', { ctrlKey: true, altKey: true, code: 'KeyN' })), 'new')
+  assert.equal(plugin.matchDraftsHotkey(ev('в', { ctrlKey: true, altKey: true, code: 'KeyD' })), 'toggle')
+  // No code (old engine): layout-dependent key falls back.
   assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true })), 'new')
-  assert.equal(plugin.matchDraftsHotkey(ev('d', { ctrlKey: true, altKey: true })), 'toggle')
   assert.equal(plugin.matchDraftsHotkey(ev('D', { ctrlKey: true, altKey: true })), 'toggle')
+  // AltGraph is a typing modifier on European layouts (rides Ctrl+Alt) — never ours.
+  assert.equal(plugin.matchDraftsHotkey(ev('q', {
+    ctrlKey: true, altKey: true, code: 'KeyQ', getModifierState: () => true,
+  })), null)
   // Not ours: single modifiers, extra modifiers, other keys.
-  assert.equal(plugin.matchDraftsHotkey(ev('n', { altKey: true })), null)
-  assert.equal(plugin.matchDraftsHotkey(ev('d', { ctrlKey: true })), null)
-  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, shiftKey: true })), null)
-  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, metaKey: true })), null)
-  assert.equal(plugin.matchDraftsHotkey(ev('q', { ctrlKey: true, altKey: true })), null)
-  // Editable targets keep their keystrokes (the composer owns typing).
-  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, target: { tagName: 'TEXTAREA' } })), null)
-  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, target: { isContentEditable: true } })), null)
+  assert.equal(plugin.matchDraftsHotkey(ev('n', { altKey: true, code: 'KeyN' })), null)
+  assert.equal(plugin.matchDraftsHotkey(ev('d', { ctrlKey: true, code: 'KeyD' })), null)
+  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, code: 'KeyN', shiftKey: true })), null)
+  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, code: 'KeyN', metaKey: true })), null)
+  assert.equal(plugin.matchDraftsHotkey(ev('q', { ctrlKey: true, altKey: true, code: 'KeyQ' })), null)
 })
 
 test('draftPreview collapses whitespace and caps length', async () => {

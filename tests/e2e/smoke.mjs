@@ -162,6 +162,50 @@ try {
     })
     if (!lastIsCurrent) fail('switching drafts did not move the current marker')
 
+    // Draft preview: inject unsent text through React's native setter (the
+    // app's focus management deflects CDP typing, so this is the honest path
+    // to a real machine draft), switch to another draft, read the row.
+    const typed = 'preview-e2e Рефакторинг парсера'
+    await page.evaluate(text => {
+      const t = document.querySelector('textarea[data-phase]')
+      if (t === null) throw new Error('no composer textarea')
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+      t.focus()
+      setter?.call(t, text)
+      t.dispatchEvent(new Event('input', { bubbles: true }))
+    }, typed)
+    await sleep(600)
+    await page.evaluate(() => { [...document.querySelectorAll('.dsd-row')].at(-2)?.click() })
+    await sleep(1200)
+    await clickSelector('.dsd-trigger'); await sleep(800)
+    const previews = await page.evaluate(() =>
+      [...document.querySelectorAll('.dsd-row .dsd-rowPreview')].map(e => e.textContent ?? ''))
+    if (!previews.some(p => p.includes('Рефакторинг'))) {
+      fail(`draft preview missing; previews=${JSON.stringify(previews)}`)
+    }
+    // Close the popover (click the row we came from is done; ensure closed).
+    if ((await widget()).panel) { await clickSelector('.dsd-trigger'); await sleep(500) }
+
+    // Hotkeys: Ctrl+Alt+N mints a draft (puppeteer sends physical codes,
+    // which is what the layout-independent matcher reads).
+    const beforeHotkey = await hostBlanks()
+    await page.keyboard.down('Control'); await page.keyboard.down('Alt')
+    await page.keyboard.press('KeyN')
+    await page.keyboard.up('Alt'); await page.keyboard.up('Control')
+    await sleep(2000)
+    if (await hostBlanks() !== beforeHotkey + 1) fail('Ctrl+Alt+N did not mint a draft')
+    // Ctrl+Alt+D toggles the popover open.
+    await page.keyboard.down('Control'); await page.keyboard.down('Alt')
+    await page.keyboard.press('KeyD')
+    await page.keyboard.up('Alt'); await page.keyboard.up('Control')
+    await sleep(800)
+    if (!(await widget()).panel) fail('Ctrl+Alt+D did not open the popover')
+    await page.keyboard.down('Control'); await page.keyboard.down('Alt')
+    await page.keyboard.press('KeyD')
+    await page.keyboard.up('Alt'); await page.keyboard.up('Control')
+    await sleep(600)
+
+
     if (!(await widget()).panel) { await clickSelector('.dsd-trigger'); await sleep(600) }
     const viaPanel = await clickSelector('.dsd-panel .dsd-new')
     await sleep(1800)

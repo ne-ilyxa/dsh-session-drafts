@@ -78,7 +78,7 @@ interface SessionsLike {
 
 /** Per-session composer input face (ui-conversation's conversation.input). */
 interface ConversationInputLike {
-  for(scope: unknown): { readonly state: { getSnapshot(): { readonly text: string } } }
+  for(scope: unknown): { readonly state: { getSnapshot(): { readonly draft?: string } } }
 }
 
 /** The workspaces service face the patch and the widget use. */
@@ -113,27 +113,33 @@ interface ClientContextLike {
 /** Minimal keyboard-event shape the hotkey matcher reads. */
 export interface HotkeyEventLike {
   readonly key: string
+  /** Layout-independent physical key ('KeyN', 'KeyD'); absent on old engines. */
+  readonly code?: string
   readonly ctrlKey: boolean
   readonly altKey: boolean
   readonly metaKey: boolean
   readonly shiftKey: boolean
-  readonly target?: { readonly tagName?: string; readonly isContentEditable?: boolean } | null | undefined
+  /** AltGraph detector (typing on European layouts rides Ctrl+Alt). */
+  getModifierState?(state: 'AltGraph'): boolean
 }
 
 /**
  * Match the drafts hotkeys: Ctrl+Alt+N mints a new draft, Ctrl+Alt+D toggles
- * the popover. Ctrl+Alt avoids the browser's own single-modifier shortcuts
- * (Alt+D focuses the address bar on Windows Chrome, Ctrl+N opens a window).
- * Keystrokes aimed at an editable surface (the composer, inputs) are left to
- * that surface. Returns the action, or null when the event is not ours.
+ * the popover. Matching is by physical key code first — `event.key` follows
+ * the keyboard layout, so a Russian layout yields 'т' for the N key and a
+ * key-based matcher silently dies there. `event.key` stays as the fallback
+ * for engines without codes. Ctrl+Alt avoids the browser's own
+ * single-modifier shortcuts; AltGraph (Ctrl+Alt on European layouts, a
+ * TYPING modifier) is explicitly excluded so composing characters never
+ * mints drafts. Works inside editables on purpose: a Ctrl+Alt+letter is
+ * never plain typing.
  */
 export function matchDraftsHotkey(event: HotkeyEventLike): 'new' | 'toggle' | null {
   if (!event.ctrlKey || !event.altKey || event.metaKey || event.shiftKey) return null
-  const target = event.target
-  if (target !== null && target !== undefined
-    && (target.isContentEditable === true
-      || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
-      || target.tagName === 'SELECT')) return null
+  if (event.getModifierState?.('AltGraph') === true) return null
+  const code = event.code
+  if (code === 'KeyN') return 'new'
+  if (code === 'KeyD') return 'toggle'
   const key = event.key.toLowerCase()
   if (key === 'n') return 'new'
   if (key === 'd') return 'toggle'
@@ -617,12 +623,14 @@ export function apply(ctx: ClientContextLike): void {
           })
         },
         draftPreviewOf: (sessionId: string): string | undefined => {
-          // Only an opened session has a composer scope; anything else (or a
-          // runtime shape drift) previews as nothing rather than throwing.
+          // Only a listed session has a scope; its input shell is resident
+          // (the hub materializes shells with the scope). The draft field is
+          // InputState.draft; anything unexpected previews as nothing.
           try {
             const scope = ctx.sessions.scope?.(sessionId)
             if (scope === undefined) return undefined
-            return ctx.conversation.input.for(scope).state.getSnapshot().text
+            const draft = ctx.conversation.input.for(scope).state.getSnapshot().draft
+            return typeof draft === 'string' ? draft : undefined
           } catch {
             return undefined
           }
