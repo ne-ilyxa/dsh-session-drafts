@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": false,
+    "jsx": "react-jsx",
+    "lib": ["ES2022", "DOM"],
+    "types": ["react"],
+    "rootDir": "src/client",
+    "outDir": ".client-build",
+    "sourceMap": true,
+    "declaration": true,
+    "declarationDir": "lib/types/client",
+    "skipLibCheck": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": ["src/client/**/*.ts", "src/client/**/*.tsx", "src/client/**/*.d.ts"]
+}

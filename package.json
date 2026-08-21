@@ -1,0 +1,77 @@
+{
+  "name": "@ne-ilyxa/dsh-session-drafts",
+  "version": "0.1.0",
+  "description": "Cursor-style New Session for DeepSeek Harness: every click mints a durable blank draft session (no reuse), with a sidebar drafts switcher",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ne-ilyxa/dsh-session-drafts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ne-ilyxa/dsh-session-drafts/issues"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.client.json && node scripts/wrap-client.mjs",
+    "check": "tsc -p tsconfig.json && pnpm run build && node --test tests/*.test.mjs",
+    "prepack": "pnpm run build",
+    "test": "pnpm run build && node --test tests/*.test.mjs"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "new-session",
+    "drafts",
+    "session-persistence",
+    "cursor-like"
+  ],
+  "license": "BSD-3-Clause",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@types/node": "^24.0.0",
+    "@types/react": "18.3.28",
+    "react": "18.3.1",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@11.7.0"
+}

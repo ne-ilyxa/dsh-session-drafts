@@ -1,0 +1,12 @@
+# Mount dsh-session-drafts into a DSH profile.
+#
+# The plugin has no host-side behavior of its own: the client bundle it ships
+# (see `dsh.client` in package.json) patches the web runtime's New Session
+# flow in the browser. This layer exists so the package is a Profile Bundle
+# (`dsh.bundle.patch`) — the stock installation channel:
+#
+#   dsh plugin --profile web add /path/to/dsh-session-drafts
+#
+- insert:
+    - id: session-drafts
+      name: '@ne-ilyxa/dsh-session-drafts'
