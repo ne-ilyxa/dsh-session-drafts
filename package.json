@@ -50,6 +50,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json && tsc -p tsconfig.client.json && node scripts/wrap-client.mjs",
     "check": "tsc -p tsconfig.json && pnpm run build && node --test tests/*.test.mjs",
+    "test:e2e": "node tests/e2e/smoke.mjs",
     "prepare": "pnpm run build",
     "prepack": "pnpm run build",
     "test": "pnpm run build && node --test tests/*.test.mjs"
@@ -71,6 +72,7 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@types/node": "^24.0.0",
     "@types/react": "18.3.28",
+    "puppeteer-core": "^23.11.1",
     "react": "18.3.1",
     "typescript": "^5.9.2"
   },

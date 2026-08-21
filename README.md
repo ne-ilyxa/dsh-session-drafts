@@ -44,7 +44,10 @@ Switching between drafts — the accent bar marks the current one:
 pnpm install
 pnpm run check     # typecheck + build + node --test tests/*.test.mjs
 pnpm run build     # host no-op + browser bundle (lib/client.js, module-loader wrapped)
+pnpm test:e2e      # full UI flow on an isolated DSH host (needs a harness checkout + Chrome)
 ```
+
+The E2E smoke boots a throwaway DSH web host (its own `DSH_HOME` scratch profile with this checkout installed), drives the real UI in headless Chrome, and asserts host-side session truth. It skips with exit 0 when the environment is missing — configure via `E2E_DSH_ROOT` (harness checkout, default `/home/ilya/deepseek-harness`) and `CHROME_PATH` (default `/usr/bin/google-chrome`).
 
 Layout:
 
