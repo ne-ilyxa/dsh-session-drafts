@@ -43,8 +43,10 @@ jobs:
   # registry verifies the workflow's identity token against the publisher
   # registered on npmjs.com (Account Settings → Publishing access → Add
   # trusted publisher: repository ne-ilyxa/dsh-session-drafts, workflow
-  # release.yml, environment release). Until that one-time registration
-  # exists this job fails harmlessly and can be re-run after setup.
+  # release.yml, environment release). Idempotent: a version already on the
+  # registry (e.g. published manually before the tag ran) is skipped with a
+  # notice instead of failing the run — manual and automated publishing never
+  # fight over a number.
   publish-npm:
     needs: release
     runs-on: ubuntu-latest
@@ -64,4 +66,12 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
-      - run: npm publish --provenance --access public
+      - name: Publish to npm (skip when this version is already there)
+        run: |
+          PKG="$(node -p "require('./package.json').name")"
+          VER="$(node -p "require('./package.json').version")"
+          if npm view "$PKG@$VER" version >/dev/null 2>&1; then
+            echo "::notice::$PKG@$VER is already on npm — skipping publish (a manual publish wins)."
+          else
+            npm publish --provenance --access public
+          fi
