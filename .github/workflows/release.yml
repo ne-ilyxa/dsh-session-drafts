@@ -29,8 +29,10 @@ jobs:
       - name: Pack prebuilt tarball
         run: |
           pnpm pack
-          TARBALL="$(basename "$(pwd)" | sed 's/^@ne-ilyxa\///')-$(node -p "require('./package.json').version").tgz"
-          mv "$TARBALL" dsh-session-drafts.tgz
+          # pnpm names the tarball after the FULL package name with the scope
+          # flattened (ne-ilyxa-dsh-session-drafts-<version>.tgz); a fresh CI
+          # workspace holds exactly one .tgz, so glob it instead of guessing.
+          mv ./*.tgz dsh-session-drafts.tgz
       - name: Create GitHub Release with the tarball
         uses: softprops/action-gh-release@v2
         with:
