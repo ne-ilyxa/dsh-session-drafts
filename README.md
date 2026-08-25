@@ -45,16 +45,6 @@ Then restart the DSH web host (a profile boot composes the client bundle into th
 3. Hover a draft row — a gray **×** appears where other rows have **⋯**; click it to discard the draft. Send a message in one and it graduates into an ordinary chat row (⋯ menu back).
 4. Host truth: a mint happens only when it should — sessions survive a page refresh and the host restart.
 
-## Screenshots
-
-Captured against a real DSH instance (v0.5). Two drafts live in the sidebar tree as ordinary rows: the current empty one — pencil mark, gray tint, **New Session** title, creation time — and an occupied one retitled to its **live unsent-text preview**:
-
-![Drafts as sidebar tree rows: New Session and a live preview title](assets/drafts-tree.png)
-
-Hovering a draft row reveals its only control — the gray **×** (same 16px seat an ordinary chat's ⋯ menu uses); one click discards the draft:
-
-![Hovered draft row with the × discard button](assets/drafts-discard.png)
-
 ## Development
 
 ```bash
@@ -62,7 +52,7 @@ pnpm install
 pnpm run check     # typecheck + build + node --test tests/*.test.mjs
 pnpm run build     # host no-op + browser bundle (lib/client.js, module-loader wrapped)
 pnpm test:e2e      # full UI flow on an isolated DSH host (needs a harness checkout + Chrome)
-node scripts/capture-screens.mjs   # regenerate assets/*.png against a live isolated host
+node scripts/capture-screens.mjs   # optional: shoot local screenshots into assets/ (git-ignored)
 ```
 
 The E2E smoke boots a throwaway DSH web host (its own `DSH_HOME` scratch profile with this checkout installed), drives the real UI in headless Chrome, and asserts host-side session truth plus the tree DOM. It skips with exit 0 when the environment is missing — configure via `E2E_DSH_ROOT` (harness checkout, default `/home/ilya/deepseek-harness`) and `CHROME_PATH` (default `/usr/bin/google-chrome`).

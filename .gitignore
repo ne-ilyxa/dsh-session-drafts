@@ -2,3 +2,6 @@ node_modules/
 .client-build/
 *.tsbuildinfo
 .DS_Store
+
+# screenshots are shot locally, never committed
+assets/
