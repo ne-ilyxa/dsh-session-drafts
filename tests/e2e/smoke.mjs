@@ -196,10 +196,12 @@ try {
     else log('live preview row:', previewRow.text)
 
     // --- Occupied: the click now MINTS a fresh empty draft (no infinite
-    // empties, no swallowed drafts).
-    await clickNewSession(); await sleep(1600)
+    // empties, no swallowed drafts). A RAPID DOUBLE click must collapse into
+    // ONE mint — the stock connect's in-flight dedupe map, preserved by the
+    // patch routing the mint path through it.
+    await clickNewSession(); await clickNewSession(); await sleep(1800)
     let blanks = await hostBlanks()
-    if (blanks !== base + 1) fail(`expected exactly one mint after occupation, got ${base} -> ${blanks}`)
+    if (blanks !== base + 1) fail(`expected exactly one mint after occupation (double click), got ${base} -> ${blanks}`)
     rows = await draftRows()
     if (rows.length !== base + 1) fail(`draft rows after mint: ${rows.length}, expected ${base + 1}`)
     const occupied = rows.filter(r => r.text.includes('Рефакторинг'))
@@ -281,6 +283,22 @@ try {
     }
     if (!affordance.every(a => a.hasX)) fail('draft rows missing the × discard button')
 
+    // --- Inverse pin (the C2 class): workspace header rows are treeitems
+    // with their own ⋯ (Rename/Delete) — they must NEVER carry the draft
+    // treatment, even when their label prefixes a draft preview.
+    const headers = await page.evaluate(() =>
+      [...document.querySelectorAll('[role="treeitem"][aria-expanded]')].map(row => ({
+        text: row.textContent ?? '',
+        tinted: row.classList.contains('dsd-draft-row'),
+        muted: row.querySelector('button[data-dsd-muted]') !== null,
+        strayX: row.querySelector('button[data-dsd-discard]') !== null,
+      })))
+    log('workspace headers:', JSON.stringify(headers))
+    if (headers.length === 0) fail('no workspace header rows found for the inverse check')
+    if (headers.some(h => h.tinted || h.muted || h.strayX)) {
+      fail(`draft treatment leaked onto a workspace header: ${JSON.stringify(headers)}`)
+    }
+
     // --- × discards the preview draft. Note: archived sessions STAY in
     // session.list host-side (the archive is a registry-global hide set; the
     // accounting slot remains), so the honest postcondition is the row
@@ -300,7 +318,45 @@ try {
     else if (!(await draftRows()).every(r => !r.text.includes('Рефакторинг'))) fail('preview draft row survived discard')
     else log('× discarded the preview draft; tree rows back to', base + 2)
 
-    const relevant = problems.filter(l => !l.includes('favicon'))
+    // --- Host restart: drafts are durable host-side — the whole point of
+    // the model — so a full DSH server restart must not lose one.
+    const beforeRestart = await draftRows()
+    try { process.kill(-host.pid, 'SIGTERM') } catch { /* group already gone */ }
+    await sleep(2000)
+    host = spawn('pnpm', ['dsh', 'web', '--no-open', '--port', String(PORT)], {
+      cwd: DSH_ROOT,
+      env: { ...process.env, DSH_HOME: home },
+      stdio: 'ignore',
+      detached: true,
+    })
+    let restarted = false
+    for (let i = 0; i < 40 && !restarted; i++) {
+      await sleep(500)
+      try {
+        const res = await fetch(`${BASE}/`, { signal: AbortSignal.timeout(1500) })
+        restarted = res.ok
+      } catch { /* not yet */ }
+    }
+    if (!restarted) fail('scratch host did not come back up after restart')
+    await page.reload({ waitUntil: 'networkidle2' })
+    await sleep(3500)
+    // The old page's socket/chunk errors during the kill+restart window are
+    // transient by construction; only console output from the SETTLED
+    // restarted page counts for the final check.
+    const settledAt = problems.length
+    const afterRestart = await draftRows()
+    log(`after host restart: draft rows ${beforeRestart.length} -> ${afterRestart.length}`,
+      JSON.stringify(afterRestart))
+    if (afterRestart.length !== beforeRestart.length) {
+      fail(`drafts did not survive a host restart (${beforeRestart.length} -> ${afterRestart.length})`)
+    }
+    for (const marker of ['folder-occupy', 'hotkey-occupy']) {
+      if (!afterRestart.some(r => r.text.includes(marker))) {
+        fail(`occupied draft "${marker}" lost its preview across the host restart`)
+      }
+    }
+
+    const relevant = problems.slice(settledAt).filter(l => !l.includes('favicon'))
     if (relevant.length > 0) { fail(`console problems: ${relevant.slice(0, 3).join(' | ')}`) }
     if (process.exitCode !== 1) log('RESULT: PASS')
   } finally {

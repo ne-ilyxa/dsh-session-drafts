@@ -82,6 +82,9 @@ test('matchDraftsHotkey matches only Ctrl+Alt+N, layout-independent', async () =
   // An open IME composition is skipped; the legacy 229-alone signal is NOT
   // (Linux IBus stamps every keydown of a switched layout with it).
   assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, code: 'KeyN', isComposing: true })), null)
+  // OS key-repeat (a held key) must not re-fire startSession inside the
+  // in-flight mint window.
+  assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, altKey: true, code: 'KeyN', repeat: true })), null)
   // Not ours: single modifiers, extra modifiers, other keys, other codes.
   assert.equal(plugin.matchDraftsHotkey(ev('n', { altKey: true, code: 'KeyN' })), null)
   assert.equal(plugin.matchDraftsHotkey(ev('n', { ctrlKey: true, code: 'KeyN' })), null)
@@ -161,6 +164,40 @@ test('matchDraftRow prefix-matches titles, ignores the trailing time, rejects sh
   assert.equal(plugin.matchDraftRow('sellprof', ['sel']), true)
 })
 
+test('classifyDraftRow: identity decides, text fallback is tint-only', async () => {
+  const plugin = await loadPlugin()
+  const ids = new Set(['a', 'd'])
+  const titles = ['New Session', 'превью драфта']
+  // Identity path — exact, cannot misclassify.
+  assert.equal(plugin.classifyDraftRow('a', 'anything at all', ids, titles), 'full')
+  assert.equal(plugin.classifyDraftRow('graduated-chat', 'New Session now', ids, titles), 'none')
+  // Fallback path — text-prefix matches classify TINT ONLY (a false 'full'
+  // would mute a real row's ⋯ and inject a working ×; a false tint costs a
+  // gray color the next scan corrects).
+  assert.equal(plugin.classifyDraftRow(undefined, 'New Sessionnow', ids, titles), 'tint')
+  assert.equal(plugin.classifyDraftRow(undefined, 'dsh-plugins', ids, ['dsh']), 'tint')
+  assert.equal(plugin.classifyDraftRow(undefined, 'unrelated row', ids, titles), 'none')
+  // The C2 regression pin: a workspace-header text that prefixes a draft
+  // preview never reaches 'full' — even when the fiber is unreachable.
+  assert.equal(plugin.classifyDraftRow(undefined, 'fix the login bug3m', ids, ['fix']), 'tint')
+})
+
+test('draftRowTitles drops archived drafts from the marker feed', async () => {
+  const plugin = await loadPlugin()
+  const stock = sessionsFixture()
+  const all = plugin.draftRowTitles(stock, new Map(), 'New Session')
+  assert.deepEqual([...all.keys()].sort(), ['a', 'd'])
+  const filtered = plugin.draftRowTitles(stock, new Map(), 'New Session', new Set(['d']))
+  assert.deepEqual([...filtered.keys()], ['a'])
+})
+
+test('classifyDraftRow + archived filter ship in the bundle (affordance gating is real)', async () => {
+  const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+  assert.match(source, /classifyDraftRow/u)
+  assert.match(source, /overlayRefs/u, 'HMR dispose ordering refcount')
+  assert.match(source, /event.repeat === true|repeat === true/u, 'hotkey auto-repeat guard')
+})
+
 test('findSessionId walks the fiber chain to the SessionNodeItem props, bounded and guarded', async () => {
   const plugin = await loadPlugin()
   // host fiber (div props: no node) → wrapper fiber → component fiber with
@@ -195,14 +232,16 @@ test('bundle ships the draft affordance swap: muted ⋯ menu + injected × disca
   assert.match(source, /archiveSession/u, 'the × click must discard via workspace archive')
 })
 
-test('projectDraftList neutralizes the stock blank-reuse scan (hero picker mints fresh)', async () => {
+test('projectDraftList neutralizes the stock blank-reuse scan (the patched connect owns reuse)', async () => {
   const plugin = await loadPlugin()
   // connectWorkspace reuses a workspace's existing blank session by scanning
   // sessions.list for `blank && cwd === workspace.path && member && !archived`.
   // Encode that exact scan over the PROJECTED snapshot: with every draft
   // carrying blank:false, the scan finds nothing and the stock path falls
-  // through to session.create — Cursor semantics for the hero picker, for
-  // free, with no second patch.
+  // through to session.create. Harmless since v0.5 — the patched
+  // connectWorkspace applies the empty-draft rule BEFORE the stock scan —
+  // and it is what keeps the stock mint path from resurrecting an old blank
+  // when the rule decides a mint is due.
   const stock = sessionsFixture()
   const workspace = { path: '/home/x/sellprof', sessionIds: ['a', 'b'] }
   const archived = new Set()
@@ -222,6 +261,9 @@ test('projectDraftList neutralizes the stock blank-reuse scan (hero picker mints
 // ---------------------------------------------------------------------------
 // New Session patch (v0.3: reuse the empty draft, mint only when all occupied)
 // ---------------------------------------------------------------------------
+
+/** Flush the microtask chain plus one macrotask (connect→create→open depth). */
+const settle = () => new Promise(resolve => setTimeout(resolve, 0))
 
 /** Shared patch fixtures: w1={a,b} @ /home/x/sellprof, w2={d} @ /home/x/realt. */
 function patchFixtures() {
@@ -243,11 +285,25 @@ function makeServices(fixtures) {
   const opened = []
   const cleared = []
   const stockCalls = []
+  const connecting = new Map() // the stock service's per-workspace in-flight dedupe
   return {
     created, opened, cleared, stockCalls,
     workspaces: {
       list: { getSnapshot: () => fixtures.workspacesList },
       startSession(workspaceId) { stockCalls.push(workspaceId) },
+      // The stock connect: reuse-scan (nothing — drafts carry no cwd match
+      // here), then create with the production dedupe semantics.
+      async connectWorkspace(workspaceId) {
+        const pending = connecting.get(workspaceId)
+        if (pending !== undefined) return pending
+        const attempt = (async () => {
+          created.push({ workspaceId })
+          await Promise.resolve()
+          return 'fresh-1'
+        })()
+        connecting.set(workspaceId, attempt)
+        return attempt.finally(() => { connecting.delete(workspaceId) })
+      },
     },
     sessions: {
       list: { getSnapshot: () => fixtures.sessionsList },
@@ -260,6 +316,57 @@ function makeServices(fixtures) {
     },
   }
 }
+
+test('installFreshSessions routes the empty-draft rule through connectWorkspace (all mint paths)', async () => {
+  const plugin = await loadPlugin()
+  const fixtures = patchFixtures()
+  const { workspaces, sessions, created, opened } = makeServices(fixtures)
+
+  const dispose = plugin.installFreshSessions({ workspaces, sessions })
+
+  // Empty draft exists → the patched connect resolves it directly; the stock
+  // connect (and its create) never runs. This is the seat the boot initial
+  // selection and the hero workspace picker also call.
+  await assert.deepEqual(
+    await workspaces.connectWorkspace('w1'), 'a',
+    'patched connect resolves the existing empty draft',
+  )
+  assert.deepEqual(created, [], 'no mint while an empty draft exists')
+  workspaces.startSession()
+  await Promise.resolve()
+  assert.deepEqual(created, [], 'startSession through the patched connect reuses too')
+  assert.deepEqual(plain(opened), ['a'])
+
+  // Occupied world → falls through to the STOCK connect (its dedupe, its create).
+  const previews = plugin.draftRegistry().previews
+  previews.set('a', 'текст')
+  await assert.equal(await workspaces.connectWorkspace('w1'), 'fresh-1')
+  assert.deepEqual(plain(created), [{ workspaceId: 'w1' }])
+
+  dispose()
+})
+
+test('installFreshSessions collapses a rapid double-click into ONE mint (stock dedupe preserved)', async () => {
+  const plugin = await loadPlugin()
+  const fixtures = patchFixtures()
+  const { workspaces, sessions, created, opened } = makeServices(fixtures)
+  const previews = plugin.draftRegistry().previews
+  previews.set('a', 'черновик') // no empty draft anywhere
+
+  const dispose = plugin.installFreshSessions({ workspaces, sessions })
+  // Two clicks in the SAME macrotask — both land while the first create is
+  // still in flight; the stock connecting map must collapse them.
+  workspaces.startSession()
+  workspaces.startSession()
+  await settle()
+  assert.deepEqual(plain(created), [{ workspaceId: 'w1' }], 'double click minted once')
+  // Both clicks' promises settle on the SAME session; the double open is
+  // harmless — the stock sessions.open() is idempotent.
+  assert.ok(plain(opened).length >= 1 && plain(opened).every(id => id === 'fresh-1'),
+    `opened must reference only the single minted draft, got ${JSON.stringify(opened)}`)
+
+  dispose()
+})
 
 test('findReusableEmptyDraft picks the newest empty member draft, applying every stock guard', async () => {
   const plugin = await loadPlugin()
@@ -318,13 +425,13 @@ test('installFreshSessions jumps to the existing EMPTY draft instead of minting'
   // Unscoped call: fixture draft 'a' (blank, member of w1, no preview) is the
   // jump target — no session.create, just open.
   workspaces.startSession()
-  await Promise.resolve()
+  await settle()
   assert.deepEqual(created, [], 'no mint while an empty draft exists')
   assert.deepEqual(plain(opened), ['a'])
 
   // Explicit other workspace: its own empty draft.
   workspaces.startSession('w2')
-  await Promise.resolve()
+  await settle()
   assert.deepEqual(created, [])
   assert.deepEqual(plain(opened), ['a', 'd'])
 
@@ -347,7 +454,7 @@ test('installFreshSessions mints only when every draft is occupied (or none exis
   const dispose = plugin.installFreshSessions({ workspaces, sessions })
 
   workspaces.startSession()
-  await Promise.resolve()
+  await settle()
   // (plain(): the patch runs inside the VM realm — strict deepEqual compares
   // prototypes, so cross-realm values are re-encoded first.)
   assert.deepEqual(plain(created), [{ workspaceId: 'w1' }])
@@ -355,7 +462,7 @@ test('installFreshSessions mints only when every draft is occupied (or none exis
 
   // Explicit workspace targets that workspace.
   workspaces.startSession('w2')
-  await Promise.resolve()
+  await settle()
   assert.deepEqual(plain(created), [{ workspaceId: 'w1' }, { workspaceId: 'w2' }])
   assert.equal(previews.get('fresh-1'), undefined, 'the minted session is empty by definition')
 
@@ -363,7 +470,7 @@ test('installFreshSessions mints only when every draft is occupied (or none exis
   // the next unscoped click jumps, no third mint.
   previews.delete('a')
   workspaces.startSession()
-  await Promise.resolve()
+  await settle()
   assert.equal(created.length, 2)
   assert.deepEqual(plain(opened), ['fresh-1', 'fresh-1', 'a'])
 
@@ -485,6 +592,36 @@ test('installDraftProjection is idempotent and survives dispose+reinstall (HMR s
   const dispose2 = plugin.installDraftProjection({ sessions, conversation, fallbackTitle: () => 'New Session' })
   assert.equal(stock.getSnapshot().byId.a.blank, false)
   dispose2()
+})
+
+test('installDraftProjection HMR ordering: an earlier generation disposing never un-projects a live one', async () => {
+  const plugin = await loadPlugin()
+  const stock = miniStore(sessionsFixture())
+  const originalGet = stock.getSnapshot
+  const sessions = {
+    list: stock,
+    scope: () => undefined,
+    create: async () => 'x',
+    open: () => {},
+    clear: () => {},
+  }
+  const conversation = { input: { for: () => { throw new Error('no binding') } } }
+  const install = () => plugin.installDraftProjection({
+    sessions, conversation, fallbackTitle: () => 'New Session',
+  })
+
+  // Generation N installs; generation N+1 ADOPTS the same shadow; then N's
+  // disposer runs (out of order) — the store must stay projected until the
+  // LAST generation disposes.
+  const disposeN = install()
+  const disposeN1 = install()
+  assert.equal(stock.getSnapshot().byId.a.blank, false)
+  disposeN()
+  assert.equal(stock.getSnapshot().byId.a.blank, false,
+    'an earlier generation disposing must not un-project the live one')
+  disposeN1()
+  assert.equal(stock.getSnapshot, originalGet, 'the last generation out restores stock')
+  assert.equal(stock.getSnapshot().byId.a.blank, true)
 })
 
 test('installDraftProjection keeps restored previews through the boot race (pending list)', async () => {

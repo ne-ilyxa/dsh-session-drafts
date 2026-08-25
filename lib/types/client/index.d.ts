@@ -108,6 +108,13 @@ interface WorkspacesLike {
         getSnapshot(): WorkspaceListLike;
     };
     startSession(workspaceId?: string): void;
+    /**
+     * Connect a Workspace's draft: reuse-or-create its blank session. Every
+     * mint path funnels here (stock `startSession`, the boot initial
+     * selection, the hero workspace picker) — which is why the empty-draft
+     * rule patches THIS seat, not just `startSession`.
+     */
+    connectWorkspace?(workspaceId: string): Promise<string>;
     /** Archive (discard) a session: the row hides, the session log remains. */
     archiveSession(sessionId: string): Promise<void>;
 }
@@ -152,6 +159,8 @@ export interface HotkeyEventLike {
     readonly shiftKey: boolean;
     /** True exactly while a real IME composition is open (not the legacy 229). */
     readonly isComposing?: boolean;
+    /** True for OS key-repeat events (held key); auto-repeat must not re-mint. */
+    readonly repeat?: boolean;
 }
 /**
  * Match the draft hotkey: Ctrl+Alt+N mints a new draft. Matching is by
@@ -189,7 +198,7 @@ export declare function draftTitleOf(summary: SessionRowLike, previews: Readonly
  */
 export declare function projectDraftList<T extends SessionListLike>(stock: T, previews: ReadonlyMap<string, string>, fallbackTitle: string): T;
 /** sessionId → overlay title for every projectable draft (DOM marker feed). */
-export declare function draftRowTitles(stock: SessionListLike, previews: ReadonlyMap<string, string>, fallbackTitle: string): Map<string, string>;
+export declare function draftRowTitles(stock: SessionListLike, previews: ReadonlyMap<string, string>, fallbackTitle: string, archived?: ReadonlySet<string>): Map<string, string>;
 /**
  * Whether a rendered tree row's visible text is one of the draft titles.
  * The row's textContent is `title + trailing time label` (menus and hover
@@ -198,6 +207,20 @@ export declare function draftRowTitles(stock: SessionListLike, previews: Readonl
  * workspace label would paint a row that is not a draft.
  */
 export declare function matchDraftRow(rowText: string, titles: Iterable<string>): boolean;
+/** How a rendered row should be treated by the marker. */
+export type DraftRowKind = 'none' | 'tint' | 'full';
+/**
+ * Classify one rendered tree row against the draft set — the marker's entire
+ * decision, extracted pure for tests. IDENTITY decides wherever it can: a
+ * fiber-resolved session id compared against the draft-id set can never
+ * misclassify (workspace-header fibers carry no `node` prop; a graduated
+ * chat's id left the set). The text-prefix fallback is TINT-ONLY: text can
+ * collide (a workspace label or a graduated title prefixing a draft's
+ * preview), and a false 'full' would mute a real row's ⋯ and inject a
+ * working × — functional breakage. A false 'tint' costs a gray color that
+ * the next scan (or the preview changing) corrects.
+ */
+export declare function classifyDraftRow(rowId: string | undefined, rowText: string, draftIds: ReadonlySet<string>, draftTitles: readonly string[]): DraftRowKind;
 /** Cross-generation overlay state plus the memo cell of the shadowed store. */
 export interface DraftRegistry {
     /** sessionId → live composer preview (empty drafts absent). */
@@ -212,6 +235,7 @@ export interface DraftRegistry {
     cache: {
         input: unknown;
         version: number;
+        title: string;
         output: SessionListLike;
     };
     /**
@@ -223,6 +247,14 @@ export interface DraftRegistry {
     stockGet: (() => SessionListLike) | undefined;
     /** Store-restore seat while the shadow is installed (unload/HMR dispose). */
     restoreStore: (() => void) | undefined;
+    /**
+     * Live installs over the store shadow: the installer (generation N) plus
+     * every HMR generation that ADOPTED its shadow instead of re-shadowing.
+     * The last one out restores the stock faces — an earlier disposer
+     * restoring while a later generation still lives would silently un-project
+     * the plugin (drafts vanish from the tree, no error).
+     */
+    overlayRefs: number;
     /** Marker rescan seat (installed by the DOM effect; emit() pokes it). */
     rescan: (() => void) | undefined;
     /** localStorage write debounce timer. */
@@ -247,22 +279,32 @@ export declare function resolveTargetWorkspaceId(workspaces: WorkspaceListLike, 
 export declare function findReusableEmptyDraft(stock: SessionListLike, workspaces: WorkspaceListLike, previews: ReadonlyMap<string, string>, workspaceId: string): SessionRowLike | undefined;
 /**
  * Patch one live WorkspaceRuntime instance with the Cursor New Session rule:
- * **never stack empty drafts**. A click first looks for an existing EMPTY
- * draft of the target workspace (no unsent composer text — see
- * {@link findReusableEmptyDraft}) and opens it; only when every draft is
- * occupied (or none exists) does it mint a fresh durable session on the host
- * (`session.create`) and open that. The stock method, by contrast, reuses
- * the workspace's blank session regardless of typed text, capping empty
- * chats at one per workspace and silently discarding the draft you were
- * writing. The resolution policy (explicit → current Session's workspace →
- * recent workspace; clear the selection when none exists) is preserved.
+ * **never stack empty drafts** — on EVERY mint path, not just the button.
+ *
+ * `connectWorkspace` is the funnel the stock runtime uses for all of them
+ * (stock `startSession`, the boot initial selection, the hero workspace
+ * picker), so THAT is the seat the rule patches: connect first looks for the
+ * workspace's existing EMPTY draft (no unsent composer text — see
+ * {@link findReusableEmptyDraft}) and resolves it; only when every draft is
+ * occupied does it fall through to the stock connect, which mints a fresh
+ * durable session (`session.create` persists the Session entity host-side).
+ * The mint path stays the stock method on purpose: its per-workspace
+ * in-flight dedupe map collapses a rapid double-click into ONE mint. The
+ * patched `startSession` just resolves the target Workspace (stock policy:
+ * explicit → current Session's workspace → recent; clear the selection when
+ * none exists) and routes through the patched connect + open. The stock
+ * method, by contrast, reused the workspace's blank session regardless of
+ * typed text — one empty chat per workspace, silently discarding the draft
+ * you were writing — while the v0.3 button-only patch still let the boot and
+ * picker paths stack empties.
  *
  * The reuse scan reads the STOCK list snapshot: the public `getSnapshot` is
  * shadowed by the draft projection once {@link installDraftProjection} is
  * live (blank drafts carry `blank: false` there and would be invisible to
  * the scan), so the registry's stock seat is preferred with the public face
  * as the pre-install fallback.
- * @returns disposer restoring the stock method (no-op when unsupported).
+ * @returns disposer restoring both stock methods (no-op when unsupported;
+ * `connectWorkspace` alone missing degrades to the startSession-only rule).
  */
 export declare function installFreshSessions(deps: {
     workspaces: WorkspacesLike;
@@ -296,6 +338,8 @@ export declare function installDraftProjection(deps: {
         readonly input: ConversationInputLike;
     };
     fallbackTitle: () => string;
+    /** Registry-global archive set (discarded drafts); absent degrades to unfiltered. */
+    archivedIds?: () => readonly string[] | undefined;
 }): () => void;
 /** Minimal React fiber shape the session-id walk reads. */
 export interface FiberLike {
