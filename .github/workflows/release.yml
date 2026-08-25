@@ -1,7 +1,11 @@
-# Release: on a v* tag, build the package and attach the prebuilt tarball to
-# a GitHub Release. The tarball is the install path that needs neither npm
+# Release: on a v* tag, run the checks and attach the prebuilt tarball to a
+# GitHub Release. The tarball is the install path that needs neither npm
 # nor pnpm's allowBuilds build approval (see awesome-dsh-plugin's
 # contributing guide): storefronts offer it via the `tarball:` field.
+#
+# npm is published MANUALLY by the maintainer (npm login + npm publish);
+# `prepack` builds the same prebuilt tarball, and the workflow's idempotence
+# concern is gone because CI never touches the registry.
 name: Release
 
 on:
@@ -38,40 +42,3 @@ jobs:
         with:
           files: dsh-session-drafts.tgz
           generate_release_notes: true
-
-  # npm trusted publishing (OIDC): no stored tokens, no 2FA prompt — the
-  # registry verifies the workflow's identity token against the publisher
-  # registered on npmjs.com (Account Settings → Publishing access → Add
-  # trusted publisher: repository ne-ilyxa/dsh-session-drafts, workflow
-  # release.yml, environment release). Idempotent: a version already on the
-  # registry (e.g. published manually before the tag ran) is skipped with a
-  # notice instead of failing the run — manual and automated publishing never
-  # fight over a number.
-  publish-npm:
-    needs: release
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11.7.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
-          registry-url: https://registry.npmjs.org
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run build
-      - name: Publish to npm (skip when this version is already there)
-        run: |
-          PKG="$(node -p "require('./package.json').name")"
-          VER="$(node -p "require('./package.json').version")"
-          if npm view "$PKG@$VER" version >/dev/null 2>&1; then
-            echo "::notice::$PKG@$VER is already on npm — skipping publish (a manual publish wins)."
-          else
-            npm publish --provenance --access public
-          fi

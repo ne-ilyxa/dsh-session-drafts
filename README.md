@@ -27,8 +27,8 @@ Then restart the DSH web host (a profile boot composes the client bundle into th
 
 ### Release channels
 
-- **npm** — `@ne-ilyxa/dsh-session-drafts`; published from CI via [trusted publishing (OIDC)](https://docs.npmjs.com/publishing-packages/publishing-with-trusted-publishing): no stored tokens, no 2FA prompts. Pushing a `v*` tag runs [release.yml](.github/workflows/release.yml): tests → prebuilt tarball attached to the GitHub Release → `npm publish --provenance`. The one-time setup is on npmjs.com: Account Settings → Publishing access → Add trusted publisher (repository `ne-ilyxa/dsh-session-drafts`, workflow `release.yml`, environment `release`).
-- **Prebuilt tarball** — every GitHub Release carries `dsh-session-drafts.tgz` (built by `prepack`, installable without npm and without pnpm's `allowBuilds` build approval).
+- **npm** — `@ne-ilyxa/dsh-session-drafts`; published **manually** by the maintainer (`npm login && npm publish --access public` — `prepack` builds the package). CI never touches the registry.
+- **Prebuilt tarball** — pushing a `v*` tag runs [release.yml](.github/workflows/release.yml): checks → `pnpm pack` → `dsh-session-drafts.tgz` attached to the GitHub Release. Installable without npm and without pnpm's `allowBuilds` build approval; this is the artifact storefronts prefer.
 
 ## Keyboard shortcuts
 
@@ -47,11 +47,13 @@ Then restart the DSH web host (a profile boot composes the client bundle into th
 
 ## Screenshots
 
-The popover model shown below was **retired in v0.2** (kept for history only): drafts now render as ordinary sidebar tree rows — gray tinted, pencil-marked, live-preview titles, creation time, a single hover-revealed × — with no popover anywhere.
+Captured against a real DSH instance (v0.5). Two drafts live in the sidebar tree as ordinary rows: the current empty one — pencil mark, gray tint, **New Session** title, creation time — and an occupied one retitled to its **live unsent-text preview**:
 
-![Retired v0.1 drafts popover (historical)](assets/drafts-popover.png)
+![Drafts as sidebar tree rows: New Session and a live preview title](assets/drafts-tree.png)
 
-![Retired v0.1 draft switching (historical)](assets/drafts-switched.png)
+Hovering a draft row reveals its only control — the gray **×** (same 16px seat an ordinary chat's ⋯ menu uses); one click discards the draft:
+
+![Hovered draft row with the × discard button](assets/drafts-discard.png)
 
 ## Development
 
@@ -60,6 +62,7 @@ pnpm install
 pnpm run check     # typecheck + build + node --test tests/*.test.mjs
 pnpm run build     # host no-op + browser bundle (lib/client.js, module-loader wrapped)
 pnpm test:e2e      # full UI flow on an isolated DSH host (needs a harness checkout + Chrome)
+node scripts/capture-screens.mjs   # regenerate assets/*.png against a live isolated host
 ```
 
 The E2E smoke boots a throwaway DSH web host (its own `DSH_HOME` scratch profile with this checkout installed), drives the real UI in headless Chrome, and asserts host-side session truth plus the tree DOM. It skips with exit 0 when the environment is missing — configure via `E2E_DSH_ROOT` (harness checkout, default `/home/ilya/deepseek-harness`) and `CHROME_PATH` (default `/usr/bin/google-chrome`).
