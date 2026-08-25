@@ -264,35 +264,41 @@ try {
     if ((await hostBlanks()) !== base + 3) fail('Ctrl+Alt+N minted while an EMPTY draft existed')
     if ((await draftRows()).length !== base + 3) fail('hotkey drafts not visible in tree')
 
-    // --- Archive (= discard) via the stock row menu on the preview draft.
-    // Note: archived sessions STAY in session.list host-side (the archive is
-    // a registry-global hide set; the accounting slot remains), so the honest
-    // postcondition is the row disappearing from the tree.
-    const archived = await page.evaluate(() => {
+    // --- Draft affordance: NO ⋯ menu (Rename/Fork/Archive are chat verbs —
+    // a draft is a placeholder); the only trailing control is the × discard
+    // button, riding the same hover cell at the ⋯'s metrics.
+    const affordance = await page.evaluate(() =>
+      [...document.querySelectorAll('[role="treeitem"].dsd-draft-row')].map(row => {
+        const ell = row.querySelector('button[aria-label^="Session actions for"]')
+        return {
+          menuHidden: ell === null || getComputedStyle(ell).display === 'none',
+          hasX: row.querySelector('button[data-dsd-discard]') !== null,
+        }
+      }))
+    log('draft affordance:', JSON.stringify(affordance))
+    if (affordance.length === 0 || !affordance.every(a => a.menuHidden)) {
+      fail('draft rows still expose the stock ⋯ menu')
+    }
+    if (!affordance.every(a => a.hasX)) fail('draft rows missing the × discard button')
+
+    // --- × discards the preview draft. Note: archived sessions STAY in
+    // session.list host-side (the archive is a registry-global hide set; the
+    // accounting slot remains), so the honest postcondition is the row
+    // disappearing from the tree.
+    const discarded = await page.evaluate(() => {
       const row = [...document.querySelectorAll('[role="treeitem"].dsd-draft-row')]
         .find(r => (r.textContent ?? '').includes('Рефакторинг'))
       if (row === undefined) return 'row not found'
-      const trigger = row.querySelector('button[aria-label^="Session actions for"]')
-      if (trigger === null) return 'menu trigger not found'
-      trigger.click()
-      return 'opened'
+      const x = row.querySelector('button[data-dsd-discard]')
+      if (x === null) return '× button not found'
+      x.click()
+      return 'clicked'
     })
-    await sleep(600)
-    if (archived !== 'opened') fail(`row menu: ${archived}`)
-    else {
-      const clicked = await page.evaluate(() => {
-        const item = [...document.querySelectorAll('button, [role="menuitem"]')]
-          .find(el => (el.textContent ?? '').trim() === 'Archive session')
-        if (item === undefined) return false
-        item.click()
-        return true
-      })
-      await sleep(1500)
-      if (!clicked) fail('Archive session menu item not found')
-      else if ((await draftRows()).length !== base + 2) fail('archived draft row still rendered')
-      else if (!(await draftRows()).every(r => !r.text.includes('Рефакторинг'))) fail('preview draft row survived archive')
-      else log('archive discarded the preview draft; tree rows back to', base + 2)
-    }
+    await sleep(1500)
+    if (discarded !== 'clicked') fail(`discard: ${discarded}`)
+    else if ((await draftRows()).length !== base + 2) fail('discarded draft row still rendered')
+    else if (!(await draftRows()).every(r => !r.text.includes('Рефакторинг'))) fail('preview draft row survived discard')
+    else log('× discarded the preview draft; tree rows back to', base + 2)
 
     const relevant = problems.filter(l => !l.includes('favicon'))
     if (relevant.length > 0) { fail(`console problems: ${relevant.slice(0, 3).join(' | ')}`) }

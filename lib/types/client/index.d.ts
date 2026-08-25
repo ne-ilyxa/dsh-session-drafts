@@ -21,8 +21,10 @@
  *    each blank non-subagent session with `blank: false` and a draft title.
  *    The stock tree then renders every draft as a first-class row under its
  *    workspace: creation time on the trailing cell (updatedAt of a blank
- *    session is its creation time — nothing moves it), the row menu
- *    (Rename/Fork/Archive — Archive IS discard), click to open. The same
+ *    session is its creation time — nothing moves it), and click to open.
+ *    A draft is a placeholder, not a chat: its stock ⋯ menu
+ *    (Rename/Fork/Archive) is muted and a single × discards it (see 3).
+ *    The same
  *    overlay feeds `workspaces.connectWorkspace`'s reuse scan (it reads
  *    `sessions.list` too), so the hero workspace picker also stops reusing
  *    the workspace's old blank and mints a fresh draft — Cursor semantics.
@@ -100,12 +102,14 @@ interface ConversationInputLike {
         }>;
     };
 }
-/** The workspaces service face the patch uses. */
+/** The workspaces service face the patch and the discard wiring use. */
 interface WorkspacesLike {
     readonly list: {
         getSnapshot(): WorkspaceListLike;
     };
     startSession(workspaceId?: string): void;
+    /** Archive (discard) a session: the row hides, the session log remains. */
+    archiveSession(sessionId: string): Promise<void>;
 }
 /** Workspace row facts the empty-draft reuse scan reads. */
 interface WorkspaceLike {
@@ -176,7 +180,8 @@ export declare function draftTitleOf(summary: SessionRowLike, previews: Readonly
  * Project the STOCK session-list snapshot into the drafts view: every blank
  * non-subagent session becomes a first-class row (`blank: false`) carrying
  * its draft title, so the stock tree renders it — under its workspace, with
- * the creation-time cell and the row menu (Archive = discard). Subagent
+ * the creation-time cell and the × discard affordance (the stock ⋯ menu is
+ * muted for drafts — Rename/Fork/Archive are chat verbs). Subagent
  * blanks keep their flag (stock hides them by design); rows that need no
  * change keep their object identity, and when nothing changes the SNAPSHOT
  * reference is returned untouched — getSnapshot must stay referentially
@@ -292,15 +297,44 @@ export declare function installDraftProjection(deps: {
     };
     fallbackTitle: () => string;
 }): () => void;
+/** Minimal React fiber shape the session-id walk reads. */
+export interface FiberLike {
+    readonly return?: unknown;
+    readonly memoizedProps?: {
+        readonly node?: {
+            readonly id?: unknown;
+        };
+    } | null;
+}
 /**
- * Mark rendered draft rows. The row renderer is bundle-internal, so the
- * identity is painted from the outside: a MutationObserver watches the
- * document, every pass matches `[role="treeitem"]` rows against the
- * registry's title set, and CSS does the rest. Purely cosmetic: if the DOM
- * shape drifts, rows keep working and only lose the tint.
- * @returns disposer stopping the observer and clearing the marks.
+ * Resolve the Session id from a rendered row's React fiber: walk up from the
+ * row's host fiber to the SessionNodeItem component fiber, whose props carry
+ * the derived `node`. The DOM carries no session id (aria labels are
+ * locale-dependent), so the fiber is the only honest address. Bounded hops;
+ * any shape drift just returns undefined (the row keeps working, the ×
+ * resolves on a later scan). Pure — testable against a fake fiber chain.
  */
-export declare function installDraftMarker(): () => void;
+export declare function findSessionId(start: unknown, maxHops?: number): string | undefined;
+/**
+ * Mark rendered draft rows and swap their affordance: a draft is a
+ * placeholder, not a chat — the stock ⋯ menu (Rename/Fork/Archive) is muted
+ * and a single × (same 16px seat, gray, hover-revealed with the row's action
+ * cell) discards it. The row renderer is bundle-internal, so both are painted
+ * from the outside: a MutationObserver matches `[role="treeitem"]` rows
+ * against the registry's title set, mutes the menu trigger (a data attribute
+ * — the CSS hides it locale-independently), and mounts the × inside the same
+ * trailing action cell (so the stock hover rule shows/hides it exactly like
+ * the ⋯). The click resolves the session id through the row's React fiber
+ * and archives (discards) the draft. Cosmetic + one action: if the DOM shape
+ * drifts, rows keep working and only lose the swap.
+ * @returns disposer stopping the observer and clearing every mutation.
+ */
+export declare function installDraftMarker(deps: {
+    /** Localized × label (aria + tooltip), read at scan time for locale switches. */
+    discardLabel: () => string;
+    /** Discard = workspace archive: the row hides, the session log remains. */
+    archiveSession: (sessionId: string) => Promise<void>;
+}): () => void;
 /** Required services (cordis fiber inject). */
 export declare const inject: string[];
 /**

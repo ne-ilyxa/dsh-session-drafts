@@ -161,6 +161,40 @@ test('matchDraftRow prefix-matches titles, ignores the trailing time, rejects sh
   assert.equal(plugin.matchDraftRow('sellprof', ['sel']), true)
 })
 
+test('findSessionId walks the fiber chain to the SessionNodeItem props, bounded and guarded', async () => {
+  const plugin = await loadPlugin()
+  // host fiber (div props: no node) → wrapper fiber → component fiber with
+  // props.node.id — the real SessionNodeItem shape.
+  const component = { memoizedProps: { node: { id: 'session-42' } }, return: null }
+  const wrapper = { memoizedProps: { anchor: '<div/>' }, return: component }
+  const host = { memoizedProps: { className: 'row', role: 'treeitem' }, return: wrapper }
+  assert.equal(plugin.findSessionId(host), 'session-42')
+  assert.equal(plugin.findSessionId(component), 'session-42')
+
+  // No node anywhere (or a non-string id): undefined, never a throw.
+  assert.equal(plugin.findSessionId({ memoizedProps: {}, return: { return: null } }), undefined)
+  assert.equal(plugin.findSessionId({ memoizedProps: { node: { id: 7 } }, return: null }), undefined)
+  assert.equal(plugin.findSessionId(undefined), undefined)
+  assert.equal(plugin.findSessionId(null), undefined)
+
+  // A degenerate cycle is bounded by the hop limit, not an infinite loop.
+  const cyclic = { memoizedProps: null }
+  cyclic.return = cyclic
+  assert.equal(plugin.findSessionId(cyclic, 5), undefined)
+})
+
+test('bundle ships the draft affordance swap: muted ⋯ menu + injected × discard', async () => {
+  const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+  // The ⋯ trigger is muted via a data attribute (locale-independent — the
+  // aria label differs per language, so no aria selector may gate this).
+  assert.match(source, /data-dsd-muted/u)
+  assert.match(source, /button\[data-dsd-muted\]\{display:none!important\}/u)
+  // The injected × takes the ⋯'s own seat and metrics (16px iconButton).
+  assert.match(source, /data-dsd-discard/u)
+  assert.match(source, /button\[data-dsd-discard\]\{[^}]*width:16px;height:16px/u)
+  assert.match(source, /archiveSession/u, 'the × click must discard via workspace archive')
+})
+
 test('projectDraftList neutralizes the stock blank-reuse scan (hero picker mints fresh)', async () => {
   const plugin = await loadPlugin()
   // connectWorkspace reuses a workspace's existing blank session by scanning
