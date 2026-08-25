@@ -18,7 +18,6 @@ test('package is a portable, prebuilt DSH Profile Bundle with a client half', as
     inject: [
       '@deepseek-ai/dsh-client-runtime',
       '@deepseek-ai/dsh-client-locale',
-      '@deepseek-ai/dsh-client-ui-sidebar',
       '@deepseek-ai/dsh-client-ui-conversation',
     ],
   })

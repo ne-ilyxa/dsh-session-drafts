@@ -1,74 +1,95 @@
 /**
  * dsh-session-drafts, browser half.
  *
- * Cursor-style New Session for the DSH web shell:
+ * Cursor-style drafts, fully in-tree (no popover, no popup menu):
  *
- * 1. Fresh drafts — `workspaces.startSession` (the one service entry every
- *    New Session surface calls: the sidebar button, the workspace browser,
- *    the agent preset) is patched on the live WorkspaceRuntime instance to
- *    ALWAYS mint a fresh durable blank session on the host
- *    (`session.create` persists the Session entity before any message) and
- *    open it, instead of reusing the workspace's existing blank session.
- *    Several empty chats can now coexist in Session persistence.
+ * 1. Fresh drafts — `workspaces.startSession` (every New Session surface:
+ *    the sidebar button, the folder ＋, the workspace picker) is patched on
+ *    the live WorkspaceRuntime instance to ALWAYS mint a fresh durable blank
+ *    session on the host (`session.create` persists the Session entity
+ *    before any message) and open it. Several empty chats per workspace
+ *    coexist in Session persistence and survive host restarts.
  *
- * 2. Drafts switcher — the stock tree hides blank sessions other than the
- *    current one, so an add-on `sidebar.footer.action` entry (an additive
- *    list slot) renders a "Drafts" trigger + popover listing every blank
- *    session: switch to one, discard it (workspace archive), or mint a new
- *    draft straight from the panel.
+ * 2. Draft projection — the stock tree hides blank sessions other than the
+ *    current one (`sessionVisible`: blank ⇒ visible only when current), so
+ *    several drafts can never render as rows. Instead of fighting the
+ *    renderer, the plugin overlays the DATA: `sessions.list.getSnapshot` is
+ *    shadowed on the live store object (identity-stable — every reader that
+ *    already holds the observable keeps working, HMR included) to project
+ *    each blank non-subagent session with `blank: false` and a draft title.
+ *    The stock tree then renders every draft as a first-class row under its
+ *    workspace: creation time on the trailing cell (updatedAt of a blank
+ *    session is its creation time — nothing moves it), the row menu
+ *    (Rename/Fork/Archive — Archive IS discard), click to open. The same
+ *    overlay feeds `workspaces.connectWorkspace`'s reuse scan (it reads
+ *    `sessions.list` too), so the hero workspace picker also stops reusing
+ *    the workspace's old blank and mints a fresh draft — Cursor semantics.
  *
- * Patch discipline: instance-level property shadowing guarded by a
- * `Symbol.for` marker (idempotent across HMR), restored on fiber unload,
- * falling back to the stock method on any synchronous failure. No core
- * files are modified.
+ *    The draft title is the unsent composer text (live preview, Telegram
+ *    style) when one exists — read through `conversation.input` shells and
+ *    mirrored to localStorage so previews survive reloads — the explicit
+ *    rename when the user pinned one, and the localized "New Session"
+ *    otherwise. The moment the first message is sent, the host flips
+ *    `blank` itself; the overlay stops touching the row and it becomes an
+ *    ordinary chat.
+ *
+ * 3. Draft look — the row renderer is bundle-internal (no slots exist at
+ *    row level), so the visual draft identity (gray title, pencil icon in
+ *    the empty status slot) is painted by a MutationObserver that marks
+ *    matching `[role="treeitem"]` rows with a class; theme-aware DSH
+ *    design tokens do the coloring. Purely cosmetic and self-healing: if
+ *    the DOM shape changes, rows keep working and just lose the tint.
+ *
+ * 4. Ctrl+Alt+N mints a new draft from anywhere (kept from v0.1; the
+ *    Ctrl+Alt+D popover toggle died with the popover).
+ *
+ * Patch discipline: instance-level property shadowing guarded by
+ * `Symbol.for` markers (idempotent across HMR), restored on fiber unload,
+ * falling back to the stock behavior on any synchronous failure. No core
+ * files are modified — the plugin is self-contained and portable.
+ * @module @ne-ilyxa/dsh-session-drafts/client
  */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { createPortal } from 'react-dom'
-import {
-  IconCloseOutline16,
-  IconNewChatOutline16,
-  IconPlusOutline16,
-} from '@deepseek-ai/dsh-client-ui-primitives'
 
 // ---------------------------------------------------------------------------
 // Structural surface types (the plugin declares what it consumes; the runtime
 // satisfies these structurally — same discipline as the stock client plugins).
 // ---------------------------------------------------------------------------
 
-/** Session-list row facts the drafts view reads. */
+/** Session-list row facts the draft projection reads and rewrites. */
 interface SessionRowLike {
   readonly id: string
   readonly blank: boolean
   readonly cwd?: string
   readonly updatedAt: number
   readonly origin?: string
+  /** Explicit user title (the rename gesture); present only when pinned. */
+  readonly title?: string
+  /** Stock display projection (explicit title → cwd basename → id). */
+  readonly displayTitle?: string
 }
 
-/** sessions.list snapshot facts the drafts view reads. */
+/** sessions.list snapshot facts the draft projection reads. */
 interface SessionListLike {
   readonly ids: readonly string[]
   readonly byId: Readonly<Record<string, SessionRowLike | undefined>>
   readonly current: string | undefined
 }
 
-/** Workspace row facts the drafts view reads. */
-interface WorkspaceLike {
-  readonly workspaceId: string
-  readonly path: string
-  readonly title?: string
-  readonly sessionIds: readonly string[]
+/**
+ * The snapshot store behind `sessions.list`: a plain object literal from
+ * `createSnapshotStore` (never frozen — dev-freeze applies to the STATE,
+ * not the store), so both read faces can be shadowed with own properties
+ * while the object identity — what every already-bound reader holds —
+ * stays the same.
+ */
+interface SnapshotStoreLike<T> {
+  getSnapshot(): T
+  subscribe(fn: () => void): () => void
 }
 
-/** workspaces.list snapshot facts the drafts view reads. */
-interface WorkspaceListLike {
-  readonly items: readonly WorkspaceLike[]
-  readonly archivedSessionIds: readonly string[]
-  readonly recentWorkspaceId: string | undefined
-}
-
-/** The sessions service face the patch and the widget use. */
+/** The sessions service face the patches and the mirror use. */
 interface SessionsLike {
-  readonly list: { getSnapshot(): SessionListLike }
+  readonly list: SnapshotStoreLike<SessionListLike>
   create(opts: { workspaceId?: string; cwd?: string }): Promise<string>
   open(id: string): void
   clear(): void
@@ -78,27 +99,32 @@ interface SessionsLike {
 
 /** Per-session composer input face (ui-conversation's conversation.input). */
 interface ConversationInputLike {
-  for(scope: unknown): { readonly state: { getSnapshot(): { readonly draft?: string } } }
+  for(scope: unknown): {
+    readonly state: SnapshotStoreLike<{ readonly draft?: string }>
+  }
 }
 
-/** The workspaces service face the patch and the widget use. */
+/** The workspaces service face the patch uses. */
 interface WorkspacesLike {
   readonly list: { getSnapshot(): WorkspaceListLike }
   startSession(workspaceId?: string): void
-  archiveSession(sessionId: string): Promise<void>
 }
 
-/** Locale registration face (the locale plugin's product). */
+/** workspaces.list snapshot facts the patch reads. */
+interface WorkspaceListLike {
+  readonly items: readonly { readonly workspaceId: string; readonly sessionIds: readonly string[] }[]
+  readonly recentWorkspaceId: string | undefined
+}
+
+/** Locale registration and binding face (the locale plugin's product). */
 interface LocaleLike {
   register(ns: string, dicts: Record<string, Record<string, string>>): () => void
+  /** Bind a namespace to a translate function reading the active locale at call time. */
+  bind?(ns: string): (key: string, params?: Record<string, string | number>) => string
 }
 
 /** Browser Cordis context face this plugin consumes. */
-interface ClientContextLike {
-  readonly slots: {
-    inject(key: string, install: () => (() => void)): () => void
-    register(options: Record<string, unknown>, component: unknown): () => void
-  }
+export interface ClientContextLike {
   readonly sessions: SessionsLike
   readonly workspaces: WorkspacesLike
   readonly locale: LocaleLike
@@ -113,7 +139,7 @@ interface ClientContextLike {
 /** Minimal keyboard-event shape the hotkey matcher reads. */
 export interface HotkeyEventLike {
   readonly key: string
-  /** Layout-independent physical key ('KeyN', 'KeyD'); absent on old engines. */
+  /** Layout-independent physical key ('KeyN'); absent on old engines. */
   readonly code?: string
   readonly ctrlKey: boolean
   readonly altKey: boolean
@@ -124,109 +150,213 @@ export interface HotkeyEventLike {
 }
 
 /**
- * Match the drafts hotkeys: Ctrl+Alt+N mints a new draft, Ctrl+Alt+D toggles
- * the popover. Matching is by physical key code first — `event.key` follows
- * the keyboard layout, so a Russian layout yields 'т' for the N key and a
- * key-based matcher silently dies there. `event.key` stays as the fallback
- * for engines without codes. Ctrl+Alt avoids the browser's own
- * single-modifier shortcuts; an open IME composition is skipped — but the
- * legacy keyCode-229-alone signal deliberately is NOT (under Linux IBus every
- * keydown of a layout switch carries 229). There is deliberately NO
- * AltGraph guard: Firefox on Linux reports AltGraph=true for EVERY Ctrl+Alt
- * combination (X11 maps AltGr to Ctrl+Alt), so such a guard — however
- * well-meant for European layouts — kills the hotkeys for every Firefox user
- * on Linux.
+ * Match the draft hotkey: Ctrl+Alt+N mints a new draft. Matching is by
+ * physical key code first — `event.key` follows the keyboard layout, so a
+ * Russian layout yields 'т' for the N key and a key-based matcher silently
+ * dies there. `event.key` stays as the fallback for engines without codes.
+ * Ctrl+Alt avoids the browser's own single-modifier shortcuts; an open IME
+ * composition is skipped — but the legacy keyCode-229-alone signal
+ * deliberately is NOT (under Linux IBus every keydown of a layout switch
+ * carries 229). There is deliberately NO AltGraph guard: Firefox on Linux
+ * reports AltGraph=true for EVERY Ctrl+Alt combination (X11 maps AltGr to
+ * Ctrl+Alt), so such a guard — however well-meant for European layouts —
+ * kills the hotkey for every Firefox user on Linux. (The Ctrl+Alt+D toggle
+ * died with the popover in v0.2.)
  */
-export function matchDraftsHotkey(event: HotkeyEventLike): 'new' | 'toggle' | null {
+export function matchDraftsHotkey(event: HotkeyEventLike): 'new' | null {
   if (!event.ctrlKey || !event.altKey || event.metaKey || event.shiftKey) return null
   if (event.isComposing === true) return null
-  const code = event.code
-  if (code === 'KeyN') return 'new'
-  if (code === 'KeyD') return 'toggle'
-  const key = event.key.toLowerCase()
-  if (key === 'n') return 'new'
-  if (key === 'd') return 'toggle'
-  return null
+  if (event.code === 'KeyN') return 'new'
+  if (event.code !== undefined) return null
+  return event.key.toLowerCase() === 'n' ? 'new' : null
 }
 
 // ---------------------------------------------------------------------------
-// Pure draft derivation (exported for tests; no React, no context).
+// Pure draft derivation (exported for tests; no React, no context, no DOM).
 // ---------------------------------------------------------------------------
-
-/** One switchable draft row projected for the popover. */
-export interface DraftRow {
-  readonly id: string
-  /** Workspace display label: its stored title's path basename, cwd basename, or Ungrouped. */
-  readonly label: string
-  readonly updatedAt: number
-  readonly current: boolean
-}
-
-/** Directory basename with both separators accepted; cwd fallback label. */
-export const UNGROUPED_LABEL = 'Ungrouped'
-
-/** basename of a path ("both separators accepted"), or the fallback label. */
-export function workspaceBaseLabel(path: string | undefined): string {
-  if (path === undefined || path === '') return UNGROUPED_LABEL
-  const base = path.replace(/[/\\]+$/, '').split(/[/\\]/).pop()
-  return base !== undefined && base !== '' ? base : path
-}
-
-/**
- * Project every switchable blank draft from the session list: blank, not a
- * subagent child, not archived; newest first (recency, id as the stable
- * tiebreak). The label prefers the workspace account that holds the session
- * (title basename), then the session cwd, then the ungrouped label.
- */
-export function selectDraftRows(
-  sessions: SessionListLike,
-  workspaces: WorkspaceListLike,
-): DraftRow[] {
-  const archived = new Set(workspaces.archivedSessionIds)
-  const labelById = new Map<string, string>()
-  for (const workspace of workspaces.items) {
-    const label = workspaceBaseLabel(workspace.title === undefined || workspace.title === ''
-      ? workspace.path
-      : workspace.title)
-    for (const id of workspace.sessionIds) {
-      if (!labelById.has(id)) labelById.set(id, label)
-    }
-  }
-  const rows: DraftRow[] = []
-  for (const id of sessions.ids) {
-    const summary = sessions.byId[id]
-    if (summary === undefined || !summary.blank || summary.origin === 'subagent') continue
-    if (archived.has(summary.id)) continue
-    rows.push({
-      id: summary.id,
-      label: labelById.get(summary.id) ?? workspaceBaseLabel(summary.cwd),
-      updatedAt: summary.updatedAt,
-      current: summary.id === sessions.current,
-    })
-  }
-  rows.sort((a, b): number =>
-    b.updatedAt !== a.updatedAt ? b.updatedAt - a.updatedAt : a.id < b.id ? -1 : 1)
-  return rows
-}
-
-/** Compact relative time for draft rows: "now", "{n}m", "{n}h", "{n}d". */
-export function draftAge(updatedAt: number, now: number): { key: 'now' | 'min' | 'hour' | 'day'; n: number } {
-  const diff = Math.max(0, now - updatedAt)
-  if (diff < 60_000) return { key: 'now', n: 0 }
-  if (diff < 3_600_000) return { key: 'min', n: Math.floor(diff / 60_000) }
-  if (diff < 86_400_000) return { key: 'hour', n: Math.floor(diff / 3_600_000) }
-  return { key: 'day', n: Math.floor(diff / 86_400_000) }
-}
 
 /**
  * One-line preview of a draft's unsent composer text: whitespace collapsed,
  * capped at {@link max} chars with an ellipsis. Blank input previews as
- * undefined (nothing to show). Pure projection of InputState.text.
+ * undefined (nothing to show). Pure projection of the input state's draft.
  */
 export function draftPreview(text: string, max = 60): string | undefined {
   const collapsed = text.replace(/\s+/g, ' ').trim()
   if (collapsed === '') return undefined
   return collapsed.length <= max ? collapsed : `${collapsed.slice(0, max).trimEnd()}…`
+}
+
+/** Whether a summary row is a projectable draft (blank, not a subagent child). */
+function isDraft(summary: SessionRowLike): boolean {
+  return summary.blank && summary.origin !== 'subagent'
+}
+
+/** Overlay title of one draft: live preview, then pinned title, then stock. */
+export function draftTitleOf(
+  summary: SessionRowLike,
+  previews: ReadonlyMap<string, string>,
+  fallbackTitle: string,
+): string {
+  if (summary.title !== undefined) return summary.displayTitle ?? fallbackTitle
+  return previews.get(summary.id) ?? fallbackTitle
+}
+
+/**
+ * Project the STOCK session-list snapshot into the drafts view: every blank
+ * non-subagent session becomes a first-class row (`blank: false`) carrying
+ * its draft title, so the stock tree renders it — under its workspace, with
+ * the creation-time cell and the row menu (Archive = discard). Subagent
+ * blanks keep their flag (stock hides them by design); rows that need no
+ * change keep their object identity, and when nothing changes the SNAPSHOT
+ * reference is returned untouched — getSnapshot must stay referentially
+ * stable between mutations or every uSES reader re-renders forever.
+ */
+export function projectDraftList<T extends SessionListLike>(
+  stock: T,
+  previews: ReadonlyMap<string, string>,
+  fallbackTitle: string,
+): T {
+  let changed = false
+  const byId: Record<string, SessionRowLike | undefined> = { ...stock.byId }
+  for (const id of stock.ids) {
+    const summary = stock.byId[id]
+    if (summary === undefined || !isDraft(summary)) continue
+    byId[id] = { ...summary, blank: false, displayTitle: draftTitleOf(summary, previews, fallbackTitle) }
+    changed = true
+  }
+  // Referential stability: no projectable drafts — pass the stock snapshot
+  // through untouched.
+  if (!changed) return stock
+  // The spread keeps every other member (phase, current, …) by reference.
+  return { ...stock, byId } as T
+}
+
+/** sessionId → overlay title for every projectable draft (DOM marker feed). */
+export function draftRowTitles(
+  stock: SessionListLike,
+  previews: ReadonlyMap<string, string>,
+  fallbackTitle: string,
+): Map<string, string> {
+  const titles = new Map<string, string>()
+  for (const id of stock.ids) {
+    const summary = stock.byId[id]
+    if (summary === undefined || !isDraft(summary)) continue
+    titles.set(id, draftTitleOf(summary, previews, fallbackTitle))
+  }
+  return titles
+}
+
+/**
+ * Whether a rendered tree row's visible text is one of the draft titles.
+ * The row's textContent is `title + trailing time label` (menus and hover
+ * cards are portaled away), so a prefix match is the rule. Titles shorter
+ * than 3 characters never match: a 1–2 char preview prefixing an unrelated
+ * workspace label would paint a row that is not a draft.
+ */
+export function matchDraftRow(rowText: string, titles: Iterable<string>): boolean {
+  for (const title of titles) {
+    if (title.length >= 3 && rowText.startsWith(title)) return true
+  }
+  return false
+}
+
+// ---------------------------------------------------------------------------
+// Shared draft registry (Symbol.for: one instance across HMR generations,
+// so a store shadowed by generation N keeps reading generation N+1's data).
+// ---------------------------------------------------------------------------
+
+/** Cross-generation overlay state plus the memo cell of the shadowed store. */
+export interface DraftRegistry {
+  /** sessionId → live composer preview (empty drafts absent). */
+  readonly previews: Map<string, string>
+  /** sessionId → current overlay title (the DOM marker's match set). */
+  titles: Map<string, string>
+  /** Bumped on every overlay-data change; pairs with {@link cache}. */
+  version: number
+  /** Subscribers of the shadowed store beyond the stock observable's own. */
+  readonly listeners: Set<() => void>
+  /** getSnapshot memo: (stock identity, version) → projected snapshot. */
+  cache: { input: unknown; version: number; output: SessionListLike }
+  /**
+   * Stock-snapshot reader seat (set when the store shadow is installed).
+   * Internal derivations — titles, the shell sync — MUST read the STOCK
+   * snapshot: the projected one carries `blank: false` for drafts and would
+   * make every draft-derivation see no drafts at all.
+   */
+  stockGet: (() => SessionListLike) | undefined
+  /** Store-restore seat while the shadow is installed (unload/HMR dispose). */
+  restoreStore: (() => void) | undefined
+  /** Marker rescan seat (installed by the DOM effect; emit() pokes it). */
+  rescan: (() => void) | undefined
+  /** localStorage write debounce timer. */
+  persistTimer: ReturnType<typeof setTimeout> | undefined
+}
+
+const REGISTRY_KEY = Symbol.for('@ne-ilyxa/dsh-session-drafts/registry')
+
+/** The process-wide draft registry (created once, shared across HMR loads). */
+export function draftRegistry(): DraftRegistry {
+  const holder = globalThis as { [REGISTRY_KEY]?: DraftRegistry }
+  if (holder[REGISTRY_KEY] === undefined) {
+    holder[REGISTRY_KEY] = {
+      previews: new Map(),
+      titles: new Map(),
+      version: 0,
+      listeners: new Set(),
+      cache: { input: undefined, version: -1, output: { ids: [], byId: {}, current: undefined } },
+      stockGet: undefined,
+      restoreStore: undefined,
+      rescan: undefined,
+      persistTimer: undefined,
+    }
+  }
+  return holder[REGISTRY_KEY]
+}
+
+/** localStorage seat of the preview mirror (best-effort; failures ignore). */
+const PREVIEW_STORAGE_KEY = 'dsh.plugin.session-drafts.previews'
+/** Stored previews cap and shelf life — drafts archive long before either. */
+const PREVIEW_STORAGE_CAP = 200
+const PREVIEW_STORAGE_TTL_MS = 45 * 86_400_000
+
+/** Load persisted previews into the registry (idempotent, fail-soft). */
+function loadPersistedPreviews(registry: DraftRegistry): void {
+  try {
+    const raw = localStorage.getItem(PREVIEW_STORAGE_KEY)
+    if (raw === null) return
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return
+    const now = Date.now()
+    let count = 0
+    for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (count >= PREVIEW_STORAGE_CAP) break
+      if (typeof value !== 'object' || value === null) continue
+      const { p, at } = value as { p?: unknown; at?: unknown }
+      if (typeof p !== 'string' || p === '' || typeof at !== 'number') continue
+      if (now - at > PREVIEW_STORAGE_TTL_MS) continue
+      registry.previews.set(id, p)
+      count += 1
+    }
+  } catch {
+    // Quota/private mode/corrupt JSON: persistence silently disables.
+  }
+}
+
+/** Debounced write of the preview map (fail-soft, capped, last-write-wins). */
+function schedulePersist(registry: DraftRegistry): void {
+  if (registry.persistTimer !== undefined) return
+  registry.persistTimer = setTimeout(() => {
+    registry.persistTimer = undefined
+    try {
+      const now = Date.now()
+      const entries = [...registry.previews.entries()].slice(-PREVIEW_STORAGE_CAP)
+      const payload: Record<string, { p: string; at: number }> = {}
+      for (const [id, preview] of entries) payload[id] = { p: preview, at: now }
+      localStorage.setItem(PREVIEW_STORAGE_KEY, JSON.stringify(payload))
+    } catch {
+      // Same contract as a storage failure in the stock persist layer.
+    }
+  }, 400)
 }
 
 // ---------------------------------------------------------------------------
@@ -305,257 +435,250 @@ export function installFreshSessions(deps: { workspaces: WorkspacesLike; session
 }
 
 // ---------------------------------------------------------------------------
-// Drafts switcher widget (additive `sidebar.footer.action` entry).
+// Draft projection: shadow sessions.list's two read faces on the live store
+// object (identity-stable), feed live composer previews into the titles.
 // ---------------------------------------------------------------------------
 
-const NS = 'sessionDrafts'
-const STYLE_ID = '@ne-ilyxa/dsh-session-drafts'
+/** Instance marker making the store shadow idempotent across HMR. */
+const LIST_OVERLAY_PATCH = Symbol.for('@ne-ilyxa/dsh-session-drafts/list-overlay')
 
-const en = {
-  trigger: 'Drafts',
-  triggerLabel: 'Chat drafts ({n}) — Ctrl+Alt+D',
-  header: 'Drafts',
-  rowTitle: 'New Session',
-  discard: 'Discard draft',
-  open: 'Open draft',
-  newDraft: 'New Session',
-  empty: 'No empty chats',
-  timeNow: 'now',
-  timeMin: '{n}m',
-  timeHour: '{n}h',
-  timeDay: '{n}d',
-} as const
-
-const zh = {
-  trigger: '草稿',
-  triggerLabel: '聊天草稿（{n}）— Ctrl+Alt+D',
-  header: '草稿',
-  rowTitle: '新会话',
-  discard: '丢弃草稿',
-  open: '打开草稿',
-  newDraft: '新会话',
-  empty: '暂无空白会话',
-  timeNow: '刚刚',
-  timeMin: '{n}分钟',
-  timeHour: '{n}小时',
-  timeDay: '{n}天',
-} as const
-
-/** Viewport-edge clearance for the anchored panel (matches Menu's 12px rule). */
-const PANEL_MARGIN = 12
-/** Gap between the trigger row and the panel opened above it. */
-const PANEL_GAP = 8
-
-/** Props the slot framework composes into the footer action entry. */
-interface DraftsFooterActionProps {
-  readonly wide: boolean
-  readonly useSessions: <T>(selector: (snapshot: SessionListLike) => T) => T
-  readonly useWorkspaces: <T>(selector: (snapshot: WorkspaceListLike) => T) => T
-  readonly t: (key: string, params?: Record<string, string | number>) => string
-  readonly startSession: () => void
-  readonly openSession: (sessionId: string) => void
-  readonly discardSession: (sessionId: string) => void
-  /** Raw unsent composer text of one draft (undefined when none/unopened). */
-  readonly draftPreviewOf: (sessionId: string) => string | undefined
+type PatchableStore = Omit<SnapshotStoreLike<SessionListLike>, 'getSnapshot' | 'subscribe'> & {
+  getSnapshot?: () => SessionListLike
+  subscribe?: (fn: () => void) => () => void
+  [LIST_OVERLAY_PATCH]?: { getSnapshot: () => SessionListLike; subscribe: (fn: () => void) => () => void }
 }
 
-/** Sidebar foot entry: drafts trigger + anchored popover switcher. */
-export function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode {
-  const { wide, useSessions, useWorkspaces, t, startSession, openSession, discardSession, draftPreviewOf } = props
-  const sessions = useSessions(snapshot => snapshot)
-  const workspaces = useWorkspaces(snapshot => snapshot)
-  const drafts = selectDraftRows(sessions, workspaces)
-  const [open, setOpen] = useState(false)
-  const [now, setNow] = useState(() => Date.now())
-  const triggerRef = useRef<HTMLButtonElement | null>(null)
-  const panelRef = useRef<HTMLDivElement | null>(null)
-  const [position, setPosition] = useState<{ left: number; top: number } | null>(null)
+/**
+ * Install the draft projection on the live sessions service:
+ *
+ * - `getSnapshot` is shadowed to run {@link projectDraftList} over the stock
+ *   snapshot, memoized on (stock identity, overlay version) so the uSES
+ *   contract — same reference between mutations — holds for every reader;
+ * - `subscribe` is shadowed to ALSO notify on overlay-version bumps (the
+ *   stock observable fires on host list changes only; a preview typed into a
+ *   draft changes no host state, yet the row title must move live);
+ * - composer previews: every draft with a materialized input shell (opened
+ *   at least once this page life; scopes of listed sessions persist) is
+ *   subscribed through `conversation.input`, mirrored into the registry and
+ *   localStorage, and pruned the moment the session stops being a draft
+ *   (first send flips `blank` on the host);
+ * - the stock store is observed once so freshly minted drafts recompute the
+ *   DOM marker's title set without waiting for a version bump.
+ *
+ * Everything lives in the Symbol.for registry, so an HMR-reloaded plugin
+ * generation re-attaches to a store shadowed by the previous one and the
+ * data survives the reload.
+ * @returns disposer restoring the stock read faces (no-op when unsupported).
+ */
+export function installDraftProjection(deps: {
+  sessions: SessionsLike
+  conversation: { readonly input: ConversationInputLike }
+  fallbackTitle: () => string
+}): () => void {
+  const { sessions, conversation, fallbackTitle } = deps
+  const store = sessions.list as PatchableStore
+  if (typeof store.getSnapshot !== 'function' || typeof store.subscribe !== 'function') {
+    console.warn('[session-drafts] sessions.list shape unsupported — drafts stay stock-hidden')
+    return () => {}
+  }
+  const registry = draftRegistry()
+  loadPersistedPreviews(registry)
 
-  // Drafts appearing/disappearing retimes the rows and re-anchors an open panel.
-  // The immediate setNow on open is the fix for stale ages: `now` initializes at
-  // trigger mount (≈ the first draft's creation time), so rows rendered from a
-  // later open would diff against the mount time and forever read "now".
-  useEffect(() => {
-    if (!open) return
-    setNow(Date.now())
-    const timer = setInterval(() => { setNow(Date.now()) }, 60_000)
-    return () => { clearInterval(timer) }
-  }, [open])
-
-  // Global hotkeys: Ctrl+Alt+N mints a fresh draft from anywhere (works with
-  // zero drafts too — the trigger hides, the hotkey must not), Ctrl+Alt+D
-  // toggles the popover. Registered on WINDOW in the CAPTURE phase: window is
-  // the first node of the event path, so no document/container handler can
-  // stopPropagation() the event away from us. That is not theoretical — the
-  // dsh-better-sidebar IME guard (document capture) calls stopPropagation on
-  // every keydown it believes is composition, and under Linux IBus layout
-  // switching that is EVERY keydown (keyCode 229), which silently killed
-  // bubble-phase listeners of any layout. Registered before the zero-drafts
-  // null return, so the listener lives whenever the sidebar footer does.
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent): void => {
-      // DOM EventTarget is opaque to the structural matcher (tagName lives on
-      // Element); the cast is the documented seam — the matcher narrows safely.
-      const action = matchDraftsHotkey(event as unknown as HotkeyEventLike)
-      if (action === null) return
-      event.preventDefault()
-      event.stopPropagation()
-      if (action === 'new') {
-        setOpen(false)
-        startSession()
-      } else {
-        setOpen(current => !current)
+  // ------------------------------------------------------------------ store
+  if (store[LIST_OVERLAY_PATCH] === undefined) {
+    const record = { getSnapshot: store.getSnapshot, subscribe: store.subscribe }
+    const wasOwnGet = Object.hasOwn(store, 'getSnapshot')
+    const wasOwnSub = Object.hasOwn(store, 'subscribe')
+    const originalGet = record.getSnapshot.bind(store)
+    const originalSubscribe = record.subscribe.bind(store)
+    const projectedGet = (): SessionListLike => {
+      const stock = originalGet()
+      if (registry.cache.input === stock && registry.cache.version === registry.version) {
+        return registry.cache.output
+      }
+      const output = projectDraftList(stock, registry.previews, fallbackTitle())
+      registry.cache = { input: stock, version: registry.version, output }
+      return output
+    }
+    const projectedSubscribe = (fn: () => void): (() => void) => {
+      registry.listeners.add(fn)
+      const off = originalSubscribe(fn)
+      return () => {
+        registry.listeners.delete(fn)
+        off()
       }
     }
-    window.addEventListener('keydown', onKey, true)
-    return () => { window.removeEventListener('keydown', onKey, true) }
-  }, [startSession])
+    store[LIST_OVERLAY_PATCH] = record
+    store.getSnapshot = projectedGet
+    store.subscribe = projectedSubscribe
+    registry.stockGet = originalGet
+    registry.restoreStore = () => {
+      if (store[LIST_OVERLAY_PATCH] !== record) return
+      // Restore by reassignment when the faces were own properties of the
+      // literal (they always are for createSnapshotStore products).
+      if (wasOwnGet) store.getSnapshot = record.getSnapshot
+      else delete store.getSnapshot
+      if (wasOwnSub) store.subscribe = record.subscribe
+      else delete store.subscribe
+      delete store[LIST_OVERLAY_PATCH]
+    }
+  }
+  // The registry keeps a stock reader even after a restore: HMR generation
+  // N+1 re-installs over the same store and its derivations still need the
+  // un-projected snapshot.
+  const stockSnapshot = (): SessionListLike => registry.stockGet?.() ?? store.getSnapshot!()
 
-  // Anchor the panel above the trigger (the foot sits at the viewport bottom),
-  // falling below only when there is no room; re-run on scroll/resize.
-  useLayoutEffect(() => {
-    if (!open) {
-      setPosition(null)
+  // ------------------------------------------------------------------ emit
+  /** Recompute the marker's title set from the CURRENT stock snapshot. */
+  const retitle = (): void => {
+    registry.titles = draftRowTitles(stockSnapshot(), registry.previews, fallbackTitle())
+  }
+  /** Overlay data changed: bump, retitle, wake engines and the marker. */
+  const emit = (): void => {
+    registry.version += 1
+    retitle()
+    for (const fn of [...registry.listeners]) fn()
+    registry.rescan?.()
+  }
+
+  // -------------------------------------------------------------- previews
+  const inputOffs = new Map<string, () => void>()
+
+  const syncPreview = (id: string, shellState: SnapshotStoreLike<{ readonly draft?: string }>): void => {
+    const text = shellState.getSnapshot().draft
+    const preview = typeof text === 'string' ? draftPreview(text) : undefined
+    if (preview === undefined) {
+      if (registry.previews.delete(id)) {
+        schedulePersist(registry)
+        emit()
+      }
       return
     }
-    const place = (): void => {
-      const rect = triggerRef.current?.getBoundingClientRect()
-      if (rect === undefined) return
-      const width = panelRef.current?.offsetWidth ?? 0
-      const height = panelRef.current?.offsetHeight ?? 0
-      const left = Math.min(Math.max(rect.left, PANEL_MARGIN), Math.max(PANEL_MARGIN, window.innerWidth - width - PANEL_MARGIN))
-      let top = rect.top - height - PANEL_GAP
-      if (top < PANEL_MARGIN) top = Math.min(rect.bottom + PANEL_GAP, Math.max(PANEL_MARGIN, window.innerHeight - height - PANEL_MARGIN))
-      setPosition({ left, top })
+    if (registry.previews.get(id) !== preview) {
+      registry.previews.set(id, preview)
+      schedulePersist(registry)
+      emit()
     }
-    place()
-    window.addEventListener('scroll', place, true)
-    window.addEventListener('resize', place)
-    return () => {
-      window.removeEventListener('scroll', place, true)
-      window.removeEventListener('resize', place)
+  }
+
+  /** Reconcile shell subscriptions with the current draft set. */
+  const syncShells = (): void => {
+    const snapshot = stockSnapshot()
+    const wanted = new Set<string>()
+    for (const id of snapshot.ids) {
+      const summary = snapshot.byId[id]
+      if (summary === undefined || !isDraft(summary)) continue
+      wanted.add(summary.id)
     }
-  }, [open, drafts.length])
-
-  // Outside pointerdown / Escape closes (the panel is portaled, so both the
-  // trigger and the panel count as inside).
-  useEffect(() => {
-    if (!open) return
-    const onPointerDown = (event: PointerEvent): void => {
-      const node = event.target
-      if (node instanceof Node
-        && (triggerRef.current?.contains(node) || panelRef.current?.contains(node))) return
-      setOpen(false)
+    // Drop previews of sessions that stopped being drafts (first send, or
+    // the session vanished) — the overlay would otherwise resurrect a title.
+    let pruned = false
+    for (const id of [...registry.previews.keys()]) {
+      if (!wanted.has(id) && registry.previews.delete(id)) pruned = true
     }
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setOpen(false)
+    for (const id of wanted) {
+      if (inputOffs.has(id)) continue
+      try {
+        const scope = sessions.scope?.(id)
+        if (scope === undefined) continue // never opened: no shell yet
+        const shell = conversation.input.for(scope)
+        const off = shell.state.subscribe(() => { syncPreview(id, shell.state) })
+        inputOffs.set(id, off)
+        syncPreview(id, shell.state) // seed immediately
+      } catch {
+        // No binding materialized (session never opened this page life):
+        // the preview appears after the first open; the persisted mirror
+        // covers the meanwhile.
+      }
     }
-    document.addEventListener('pointerdown', onPointerDown)
-    document.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown)
-      document.removeEventListener('keydown', onKeyDown)
+    for (const [id, off] of inputOffs) {
+      if (!wanted.has(id)) {
+        off()
+        inputOffs.delete(id)
+      }
     }
-  }, [open])
+    if (pruned) {
+      schedulePersist(registry)
+      emit()
+    }
+  }
 
-  const onOpen = useCallback((sessionId: string): void => {
-    setOpen(false)
-    openSession(sessionId)
-  }, [openSession])
-
-  const onDiscard = useCallback((sessionId: string): void => {
-    discardSession(sessionId)
-  }, [discardSession])
-
-  if (drafts.length === 0) return null
-
-  const rows = drafts.map((draft) => {
-    const age = draftAge(draft.updatedAt, now)
-    const when = age.key === 'now'
-      ? t('timeNow')
-      : t(`time${age.key === 'min' ? 'Min' : age.key === 'hour' ? 'Hour' : 'Day'}`, { n: age.n })
-    // Snapshot-at-render preview: only an opened session has a composer, and
-    // the popover is closed while its own draft is being typed into.
-    const preview = draftPreview(draftPreviewOf(draft.id) ?? '')
-    return (
-      <div
-        key={draft.id}
-        className={`dsd-row${draft.current ? ' dsd-current' : ''}`}
-        role="button"
-        tabIndex={0}
-        aria-label={`${t('open')} — ${draft.label}`}
-        onClick={() => { onOpen(draft.id) }}
-        onKeyDown={(event) => { if (event.key === 'Enter') onOpen(draft.id) }}
-      >
-        <span className="dsd-rowIcon" aria-hidden="true"><IconNewChatOutline16 size={16} /></span>
-        <span className="dsd-rowBody">
-          <span className="dsd-rowTitle">{t('rowTitle')}</span>
-          <span className="dsd-rowLabel">{draft.label}</span>
-          {preview !== undefined && <span className="dsd-rowPreview" title={preview}>{preview}</span>}
-        </span>
-        <span className="dsd-rowWhen">{when}</span>
-        <button
-          type="button"
-          className="dsd-discard"
-          aria-label={t('discard')}
-          title={t('discard')}
-          onClick={(event) => {
-            event.stopPropagation()
-            onDiscard(draft.id)
-          }}
-        >
-          <IconCloseOutline16 size={14} />
-        </button>
-      </div>
-    )
+  // Stock list changes: new drafts minted, blanks flipped by the first
+  // send, sessions archived. Retitle for the marker and reconcile shells;
+  // no version bump — engines re-read through their own subscription and
+  // the getSnapshot memo keys on the new stock identity. Subscribing
+  // through the shadowed face ALSO enrolls this callback in emit()'s wake
+  // list, so a preview change re-syncs shells too (idempotent, cheap).
+  const offStock = store.subscribe(() => {
+    retitle()
+    registry.rescan?.()
+    syncShells()
   })
 
-  return (
-    <>
-      <button
-        ref={triggerRef}
-        type="button"
-        className={`dsd-trigger${wide ? '' : ' dsd-rail'}`}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-label={t('triggerLabel', { n: drafts.length })}
-        title={t('triggerLabel', { n: drafts.length })}
-        onClick={() => { setOpen(current => !current) }}
-      >
-        <span className="dsd-triggerIcon" aria-hidden="true"><IconNewChatOutline16 size={wide ? 14 : 18} /></span>
-        {wide && <span className="dsd-triggerLabel">{t('trigger')}</span>}
-        <span className={`dsd-count${wide ? '' : ' dsd-countRail'}`}>{drafts.length}</span>
-      </button>
-      {open && createPortal(
-        <div
-          ref={panelRef}
-          className="dsd-panel"
-          role="dialog"
-          aria-label={t('header')}
-          style={position === null
-            ? { visibility: 'hidden', left: 0, top: 0 }
-            : { left: position.left, top: position.top }}
-        >
-          <div className="dsd-panelHeader">{t('header')}</div>
-          <div className="dsd-rows">{rows.length > 0 ? rows : <div className="dsd-empty">{t('empty')}</div>}</div>
-          <div className="dsd-panelFooter">
-            <button
-              type="button"
-              className="dsd-new"
-              onClick={() => {
-                setOpen(false)
-                startSession()
-              }}
-            >
-              <span aria-hidden="true"><IconPlusOutline16 size={14} /></span>
-              <span>{t('newDraft')}</span>
-            </button>
-          </div>
-        </div>,
-        document.body,
-      )}
-    </>
-  )
+  retitle()
+  syncShells()
+
+  return () => {
+    offStock()
+    for (const off of inputOffs.values()) off()
+    inputOffs.clear()
+    registry.restoreStore?.()
+    registry.restoreStore = undefined
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Draft marker: paint the visual draft identity onto rendered tree rows.
+// ---------------------------------------------------------------------------
+
+/** Class painted on draft rows (see styles below). */
+const DRAFT_ROW_CLASS = 'dsd-draft-row'
+
+/**
+ * Mark rendered draft rows. The row renderer is bundle-internal, so the
+ * identity is painted from the outside: a MutationObserver watches the
+ * document, every pass matches `[role="treeitem"]` rows against the
+ * registry's title set, and CSS does the rest. Purely cosmetic: if the DOM
+ * shape drifts, rows keep working and only lose the tint.
+ * @returns disposer stopping the observer and clearing the marks.
+ */
+export function installDraftMarker(): () => void {
+  if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return () => {}
+  const registry = draftRegistry()
+  const unmarkAll = (): void => {
+    for (const row of Array.from(document.querySelectorAll(`[role="treeitem"].${DRAFT_ROW_CLASS}`))) {
+      row.classList.remove(DRAFT_ROW_CLASS)
+    }
+  }
+  let frame: number | undefined
+  const scan = (): void => {
+    frame = undefined
+    const values = [...registry.titles.values()]
+    if (values.length === 0) {
+      unmarkAll()
+      return
+    }
+    for (const row of Array.from(document.querySelectorAll('[role="treeitem"]'))) {
+      // A tree row's textContent is `title + trailing time` (menus and
+      // hover cards are portaled away from the row).
+      if (matchDraftRow(row.textContent ?? '', values)) row.classList.add(DRAFT_ROW_CLASS)
+      else row.classList.remove(DRAFT_ROW_CLASS)
+    }
+  }
+  const schedule = (): void => {
+    if (frame !== undefined) return
+    frame = requestAnimationFrame(scan)
+  }
+  registry.rescan = schedule
+  const observer = new MutationObserver(schedule)
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true })
+  schedule()
+  return () => {
+    if (frame !== undefined) cancelAnimationFrame(frame)
+    observer.disconnect()
+    if (registry.rescan === schedule) registry.rescan = undefined
+    unmarkAll()
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -563,44 +686,39 @@ export function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode {
 // ---------------------------------------------------------------------------
 
 /** Required services (cordis fiber inject). */
-export const inject = ['slots', 'sessions', 'workspaces', 'locale', 'conversation']
+export const inject = ['sessions', 'workspaces', 'conversation', 'locale']
 
 /** Shared stylesheet, guarded by a stable data attribute across HMR loads. */
-const styles = `
-.dsd-trigger{flex:none;display:flex;align-items:center;gap:6px;box-sizing:border-box;height:36px;padding:0 10px;margin:0 2px 4px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-button-elevated-fill);color:var(--dsw-alias-label-primary);font-size:13px;cursor:pointer;width:100%;justify-content:flex-start}
-.dsd-trigger:hover{background:var(--dsw-alias-button-floating-hover)}
-.dsd-triggerIcon{display:inline-flex;flex:none;color:var(--dsw-alias-label-secondary)}
-.dsd-triggerLabel{flex:1;min-width:0;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dsd-count{flex:none;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--dsw-alias-state-warn-tertiary);color:var(--dsw-alias-label-secondary);font-size:11px;line-height:18px;text-align:center}
-.dsd-trigger.dsd-rail{width:36px;height:36px;padding:0;justify-content:center;margin:0 0 8px}
-.dsd-countRail{position:absolute;transform:translate(14px,-10px);background:var(--dsw-alias-bg-layer-3);border:1px solid var(--dsw-alias-border-l2)}
-.dsd-trigger.dsd-rail{position:relative}
-.dsd-panel{position:fixed;z-index:1100;box-sizing:border-box;width:264px;max-height:calc(100vh - 24px);display:flex;flex-direction:column;padding:4px;border:1px solid var(--dsw-alias-border-inverted);border-radius:12px;background:var(--dsw-specific-menu);box-shadow:var(--dsw-shadow-lv3);--dsh-scrollbar-thumb:var(--dsw-alias-scrollbar-bg-l2);--dsh-scrollbar-thumb-hover:var(--dsw-alias-scrollbar-hover-l2)}
-.dsd-panelHeader{flex:none;padding:8px 10px 6px;color:var(--dsw-alias-label-tertiary);font-size:12px}
-.dsd-rows{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column}
-.dsd-row{position:relative;display:flex;align-items:center;gap:8px;min-height:40px;padding:6px 8px;border-radius:10px;cursor:pointer}
-.dsd-row:hover{background:var(--dsw-alias-fill-secondary)}
-.dsd-row:focus-visible{outline:2px solid var(--dsw-alias-border-focus);outline-offset:-2px}
-.dsd-rowIcon{display:inline-flex;flex:none;color:var(--dsw-alias-label-secondary)}
-.dsd-rowBody{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
-.dsd-rowTitle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary);font-size:13px}
-.dsd-rowLabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary);font-size:11px}
-.dsd-rowPreview{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary);font-size:11px;font-style:italic}
-.dsd-rowWhen{flex:none;color:var(--dsw-alias-label-tertiary);font-size:11px}
-.dsd-current .dsd-rowTitle{color:var(--dsw-alias-label-brand)}
-.dsd-current::before{content:"";position:absolute;left:2px;top:10px;bottom:10px;width:3px;border-radius:2px;background:var(--dsw-alias-label-brand)}
-.dsd-discard{flex:none;display:none;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer}
-.dsd-row:hover .dsd-discard,.dsd-discard:focus-visible{display:inline-flex}
-.dsd-discard:hover{background:var(--dsw-alias-state-error-tertiary);color:var(--dsw-alias-state-error-primary)}
-.dsd-empty{padding:10px;color:var(--dsw-alias-label-tertiary);font-size:12px}
-.dsd-panelFooter{flex:none;display:flex;flex-direction:column;margin-top:4px;padding-top:4px;border-top:1px solid var(--dsw-alias-border-l2)}
-.dsd-new{display:flex;align-items:center;gap:8px;min-height:36px;padding:6px 10px;border:none;border-radius:10px;background:transparent;color:var(--dsw-alias-label-primary);font-size:13px;cursor:pointer}
-.dsd-new:hover{background:var(--dsw-alias-fill-secondary)}
-`
+const STYLE_ID = '@ne-ilyxa/dsh-session-drafts'
 
 /**
- * Browser plugin entry: stylesheet, dictionaries, the New Session patch, and
- * the drafts switcher registration.
+ * Draft row identity. The stock tree gives every row a 16px status slot;
+ * a draft's slot is empty (no activity), so the pencil lands there without
+ * shifting the layout — and in the flat list (no slot) the row keeps just
+ * the gray title. Colors ride the theme-aware design tokens: dark theme
+ * reads as gray-next-to-white, light theme as muted-next-to-black.
+ */
+const styles = `
+[role="treeitem"].dsd-draft-row{color:var(--dsw-alias-label-secondary)}
+[role="treeitem"].dsd-draft-row>span:first-child:empty::after{content:"";display:block;width:14px;height:14px;background-color:var(--dsw-alias-label-tertiary);-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M11.3 2.7a1.7 1.7 0 0 1 2.4 2.4L5.2 13.6l-3.2.8.8-3.2z' fill='none' stroke='%23000' stroke-width='1.4' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E") center/12px 12px no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M11.3 2.7a1.7 1.7 0 0 1 2.4 2.4L5.2 13.6l-3.2.8.8-3.2z' fill='none' stroke='%23000' stroke-width='1.4' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E") center/12px 12px no-repeat}
+`
+
+const NS = 'sessionDrafts'
+
+const en = {
+  /** Blank draft with no preview text and no pinned title. */
+  rowTitle: 'New Session',
+} as const
+
+const zh = {
+  rowTitle: '新会话',
+} as const
+
+/**
+ * Browser plugin entry: stylesheet, dictionaries, the New Session patch, the
+ * draft projection (visibility + titles + previews), the row marker, and the
+ * Ctrl+Alt+N hotkey. No slots are registered — drafts render through the
+ * stock tree.
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContextLike): void {
@@ -618,35 +736,44 @@ export function apply(ctx: ClientContextLike): void {
 
   ctx.effect(() => installFreshSessions({ workspaces: ctx.workspaces, sessions: ctx.sessions }), 'session-drafts: fresh New Session')
 
-  ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register(
-    {
-      name: 'sidebar.footer.action',
-      id: 'session-drafts',
-      order: 10,
-      inject: () => ({
-        startSession: () => { ctx.workspaces.startSession() },
-        openSession: (sessionId: string) => { ctx.sessions.open(sessionId) },
-        discardSession: (sessionId: string) => {
-          void ctx.workspaces.archiveSession(sessionId).catch((error: unknown) => {
-            console.warn('[session-drafts] draft discard failed:', error)
-          })
-        },
-        draftPreviewOf: (sessionId: string): string | undefined => {
-          // Only a listed session has a scope; its input shell is resident
-          // (the hub materializes shells with the scope). The draft field is
-          // InputState.draft; anything unexpected previews as nothing.
-          try {
-            const scope = ctx.sessions.scope?.(sessionId)
-            if (scope === undefined) return undefined
-            const draft = ctx.conversation.input.for(scope).state.getSnapshot().draft
-            return typeof draft === 'string' ? draft : undefined
-          } catch {
-            return undefined
-          }
-        },
-      }),
-      locale: NS,
-    },
-    DraftsFooterAction,
-  ))
+  ctx.effect(() => {
+    // The overlay title needs the active locale's "New Session"; bind is
+    // stable per namespace and reads the locale at call time, so the title
+    // follows the app locale on the next projection after a switch.
+    const bound = typeof ctx.locale.bind === 'function' ? ctx.locale.bind(NS) : undefined
+    const fallbackTitle = (): string => {
+      try {
+        const text = bound?.('rowTitle')
+        return typeof text === 'string' && text !== '' ? text : en.rowTitle
+      } catch {
+        return en.rowTitle
+      }
+    }
+    return installDraftProjection({
+      sessions: ctx.sessions,
+      conversation: ctx.conversation,
+      fallbackTitle,
+    })
+  }, 'session-drafts: draft projection')
+
+  ctx.effect(() => installDraftMarker(), 'session-drafts: draft row marker')
+
+  // Global hotkey: Ctrl+Alt+N mints a fresh draft from anywhere (works with
+  // zero drafts too). Registered on WINDOW in the CAPTURE phase: window is
+  // the first node of the event path, so no document/container handler can
+  // stopPropagation() the event away from us (the dsh-better-sidebar IME
+  // guard does exactly that under Linux IBus, where every keydown carries
+  // keyCode 229).
+  ctx.effect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      // DOM EventTarget is opaque to the structural matcher (tagName lives
+      // on Element); the cast is the documented seam — the matcher narrows.
+      if (matchDraftsHotkey(event as unknown as HotkeyEventLike) === null) return
+      event.preventDefault()
+      event.stopPropagation()
+      ctx.workspaces.startSession()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => { window.removeEventListener('keydown', onKey, true) }
+  }, 'session-drafts: Ctrl+Alt+N')
 }

@@ -1,7 +1,7 @@
 {
   "name": "@ne-ilyxa/dsh-session-drafts",
-  "version": "0.1.1",
-  "description": "Cursor-style New Session for DeepSeek Harness: every click mints a durable blank draft session (no reuse), with a sidebar drafts switcher",
+  "version": "0.2.0",
+  "description": "Cursor-style drafts for DeepSeek Harness: every New Session mints a persistent draft chat that lives in the sidebar tree with live preview titles, a gray tint and a pencil mark — no popup, no drafts menu",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ne-ilyxa/dsh-session-drafts.git"
@@ -43,7 +43,6 @@
       "inject": [
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-ui-sidebar",
         "@deepseek-ai/dsh-client-ui-conversation"
       ]
     }

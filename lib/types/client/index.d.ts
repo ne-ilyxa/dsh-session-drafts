@@ -1,60 +1,86 @@
 /**
  * dsh-session-drafts, browser half.
  *
- * Cursor-style New Session for the DSH web shell:
+ * Cursor-style drafts, fully in-tree (no popover, no popup menu):
  *
- * 1. Fresh drafts — `workspaces.startSession` (the one service entry every
- *    New Session surface calls: the sidebar button, the workspace browser,
- *    the agent preset) is patched on the live WorkspaceRuntime instance to
- *    ALWAYS mint a fresh durable blank session on the host
- *    (`session.create` persists the Session entity before any message) and
- *    open it, instead of reusing the workspace's existing blank session.
- *    Several empty chats can now coexist in Session persistence.
+ * 1. Fresh drafts — `workspaces.startSession` (every New Session surface:
+ *    the sidebar button, the folder ＋, the workspace picker) is patched on
+ *    the live WorkspaceRuntime instance to ALWAYS mint a fresh durable blank
+ *    session on the host (`session.create` persists the Session entity
+ *    before any message) and open it. Several empty chats per workspace
+ *    coexist in Session persistence and survive host restarts.
  *
- * 2. Drafts switcher — the stock tree hides blank sessions other than the
- *    current one, so an add-on `sidebar.footer.action` entry (an additive
- *    list slot) renders a "Drafts" trigger + popover listing every blank
- *    session: switch to one, discard it (workspace archive), or mint a new
- *    draft straight from the panel.
+ * 2. Draft projection — the stock tree hides blank sessions other than the
+ *    current one (`sessionVisible`: blank ⇒ visible only when current), so
+ *    several drafts can never render as rows. Instead of fighting the
+ *    renderer, the plugin overlays the DATA: `sessions.list.getSnapshot` is
+ *    shadowed on the live store object (identity-stable — every reader that
+ *    already holds the observable keeps working, HMR included) to project
+ *    each blank non-subagent session with `blank: false` and a draft title.
+ *    The stock tree then renders every draft as a first-class row under its
+ *    workspace: creation time on the trailing cell (updatedAt of a blank
+ *    session is its creation time — nothing moves it), the row menu
+ *    (Rename/Fork/Archive — Archive IS discard), click to open. The same
+ *    overlay feeds `workspaces.connectWorkspace`'s reuse scan (it reads
+ *    `sessions.list` too), so the hero workspace picker also stops reusing
+ *    the workspace's old blank and mints a fresh draft — Cursor semantics.
  *
- * Patch discipline: instance-level property shadowing guarded by a
- * `Symbol.for` marker (idempotent across HMR), restored on fiber unload,
- * falling back to the stock method on any synchronous failure. No core
- * files are modified.
+ *    The draft title is the unsent composer text (live preview, Telegram
+ *    style) when one exists — read through `conversation.input` shells and
+ *    mirrored to localStorage so previews survive reloads — the explicit
+ *    rename when the user pinned one, and the localized "New Session"
+ *    otherwise. The moment the first message is sent, the host flips
+ *    `blank` itself; the overlay stops touching the row and it becomes an
+ *    ordinary chat.
+ *
+ * 3. Draft look — the row renderer is bundle-internal (no slots exist at
+ *    row level), so the visual draft identity (gray title, pencil icon in
+ *    the empty status slot) is painted by a MutationObserver that marks
+ *    matching `[role="treeitem"]` rows with a class; theme-aware DSH
+ *    design tokens do the coloring. Purely cosmetic and self-healing: if
+ *    the DOM shape changes, rows keep working and just lose the tint.
+ *
+ * 4. Ctrl+Alt+N mints a new draft from anywhere (kept from v0.1; the
+ *    Ctrl+Alt+D popover toggle died with the popover).
+ *
+ * Patch discipline: instance-level property shadowing guarded by
+ * `Symbol.for` markers (idempotent across HMR), restored on fiber unload,
+ * falling back to the stock behavior on any synchronous failure. No core
+ * files are modified — the plugin is self-contained and portable.
+ * @module @ne-ilyxa/dsh-session-drafts/client
  */
-import { type ReactNode } from 'react';
-/** Session-list row facts the drafts view reads. */
+/** Session-list row facts the draft projection reads and rewrites. */
 interface SessionRowLike {
     readonly id: string;
     readonly blank: boolean;
     readonly cwd?: string;
     readonly updatedAt: number;
     readonly origin?: string;
+    /** Explicit user title (the rename gesture); present only when pinned. */
+    readonly title?: string;
+    /** Stock display projection (explicit title → cwd basename → id). */
+    readonly displayTitle?: string;
 }
-/** sessions.list snapshot facts the drafts view reads. */
+/** sessions.list snapshot facts the draft projection reads. */
 interface SessionListLike {
     readonly ids: readonly string[];
     readonly byId: Readonly<Record<string, SessionRowLike | undefined>>;
     readonly current: string | undefined;
 }
-/** Workspace row facts the drafts view reads. */
-interface WorkspaceLike {
-    readonly workspaceId: string;
-    readonly path: string;
-    readonly title?: string;
-    readonly sessionIds: readonly string[];
+/**
+ * The snapshot store behind `sessions.list`: a plain object literal from
+ * `createSnapshotStore` (never frozen — dev-freeze applies to the STATE,
+ * not the store), so both read faces can be shadowed with own properties
+ * while the object identity — what every already-bound reader holds —
+ * stays the same.
+ */
+interface SnapshotStoreLike<T> {
+    getSnapshot(): T;
+    subscribe(fn: () => void): () => void;
 }
-/** workspaces.list snapshot facts the drafts view reads. */
-interface WorkspaceListLike {
-    readonly items: readonly WorkspaceLike[];
-    readonly archivedSessionIds: readonly string[];
-    readonly recentWorkspaceId: string | undefined;
-}
-/** The sessions service face the patch and the widget use. */
+/** The sessions service face the patches and the mirror use. */
 interface SessionsLike {
-    readonly list: {
-        getSnapshot(): SessionListLike;
-    };
+    readonly list: SnapshotStoreLike<SessionListLike>;
     create(opts: {
         workspaceId?: string;
         cwd?: string;
@@ -67,31 +93,34 @@ interface SessionsLike {
 /** Per-session composer input face (ui-conversation's conversation.input). */
 interface ConversationInputLike {
     for(scope: unknown): {
-        readonly state: {
-            getSnapshot(): {
-                readonly draft?: string;
-            };
-        };
+        readonly state: SnapshotStoreLike<{
+            readonly draft?: string;
+        }>;
     };
 }
-/** The workspaces service face the patch and the widget use. */
+/** The workspaces service face the patch uses. */
 interface WorkspacesLike {
     readonly list: {
         getSnapshot(): WorkspaceListLike;
     };
     startSession(workspaceId?: string): void;
-    archiveSession(sessionId: string): Promise<void>;
 }
-/** Locale registration face (the locale plugin's product). */
+/** workspaces.list snapshot facts the patch reads. */
+interface WorkspaceListLike {
+    readonly items: readonly {
+        readonly workspaceId: string;
+        readonly sessionIds: readonly string[];
+    }[];
+    readonly recentWorkspaceId: string | undefined;
+}
+/** Locale registration and binding face (the locale plugin's product). */
 interface LocaleLike {
     register(ns: string, dicts: Record<string, Record<string, string>>): () => void;
+    /** Bind a namespace to a translate function reading the active locale at call time. */
+    bind?(ns: string): (key: string, params?: Record<string, string | number>) => string;
 }
 /** Browser Cordis context face this plugin consumes. */
-interface ClientContextLike {
-    readonly slots: {
-        inject(key: string, install: () => (() => void)): () => void;
-        register(options: Record<string, unknown>, component: unknown): () => void;
-    };
+export interface ClientContextLike {
     readonly sessions: SessionsLike;
     readonly workspaces: WorkspacesLike;
     readonly locale: LocaleLike;
@@ -103,7 +132,7 @@ interface ClientContextLike {
 /** Minimal keyboard-event shape the hotkey matcher reads. */
 export interface HotkeyEventLike {
     readonly key: string;
-    /** Layout-independent physical key ('KeyN', 'KeyD'); absent on old engines. */
+    /** Layout-independent physical key ('KeyN'); absent on old engines. */
     readonly code?: string;
     readonly ctrlKey: boolean;
     readonly altKey: boolean;
@@ -113,50 +142,81 @@ export interface HotkeyEventLike {
     readonly isComposing?: boolean;
 }
 /**
- * Match the drafts hotkeys: Ctrl+Alt+N mints a new draft, Ctrl+Alt+D toggles
- * the popover. Matching is by physical key code first — `event.key` follows
- * the keyboard layout, so a Russian layout yields 'т' for the N key and a
- * key-based matcher silently dies there. `event.key` stays as the fallback
- * for engines without codes. Ctrl+Alt avoids the browser's own
- * single-modifier shortcuts; an open IME composition is skipped — but the
- * legacy keyCode-229-alone signal deliberately is NOT (under Linux IBus every
- * keydown of a layout switch carries 229). There is deliberately NO
- * AltGraph guard: Firefox on Linux reports AltGraph=true for EVERY Ctrl+Alt
- * combination (X11 maps AltGr to Ctrl+Alt), so such a guard — however
- * well-meant for European layouts — kills the hotkeys for every Firefox user
- * on Linux.
+ * Match the draft hotkey: Ctrl+Alt+N mints a new draft. Matching is by
+ * physical key code first — `event.key` follows the keyboard layout, so a
+ * Russian layout yields 'т' for the N key and a key-based matcher silently
+ * dies there. `event.key` stays as the fallback for engines without codes.
+ * Ctrl+Alt avoids the browser's own single-modifier shortcuts; an open IME
+ * composition is skipped — but the legacy keyCode-229-alone signal
+ * deliberately is NOT (under Linux IBus every keydown of a layout switch
+ * carries 229). There is deliberately NO AltGraph guard: Firefox on Linux
+ * reports AltGraph=true for EVERY Ctrl+Alt combination (X11 maps AltGr to
+ * Ctrl+Alt), so such a guard — however well-meant for European layouts —
+ * kills the hotkey for every Firefox user on Linux. (The Ctrl+Alt+D toggle
+ * died with the popover in v0.2.)
  */
-export declare function matchDraftsHotkey(event: HotkeyEventLike): 'new' | 'toggle' | null;
-/** One switchable draft row projected for the popover. */
-export interface DraftRow {
-    readonly id: string;
-    /** Workspace display label: its stored title's path basename, cwd basename, or Ungrouped. */
-    readonly label: string;
-    readonly updatedAt: number;
-    readonly current: boolean;
-}
-/** Directory basename with both separators accepted; cwd fallback label. */
-export declare const UNGROUPED_LABEL = "Ungrouped";
-/** basename of a path ("both separators accepted"), or the fallback label. */
-export declare function workspaceBaseLabel(path: string | undefined): string;
-/**
- * Project every switchable blank draft from the session list: blank, not a
- * subagent child, not archived; newest first (recency, id as the stable
- * tiebreak). The label prefers the workspace account that holds the session
- * (title basename), then the session cwd, then the ungrouped label.
- */
-export declare function selectDraftRows(sessions: SessionListLike, workspaces: WorkspaceListLike): DraftRow[];
-/** Compact relative time for draft rows: "now", "{n}m", "{n}h", "{n}d". */
-export declare function draftAge(updatedAt: number, now: number): {
-    key: 'now' | 'min' | 'hour' | 'day';
-    n: number;
-};
+export declare function matchDraftsHotkey(event: HotkeyEventLike): 'new' | null;
 /**
  * One-line preview of a draft's unsent composer text: whitespace collapsed,
  * capped at {@link max} chars with an ellipsis. Blank input previews as
- * undefined (nothing to show). Pure projection of InputState.text.
+ * undefined (nothing to show). Pure projection of the input state's draft.
  */
 export declare function draftPreview(text: string, max?: number): string | undefined;
+/** Overlay title of one draft: live preview, then pinned title, then stock. */
+export declare function draftTitleOf(summary: SessionRowLike, previews: ReadonlyMap<string, string>, fallbackTitle: string): string;
+/**
+ * Project the STOCK session-list snapshot into the drafts view: every blank
+ * non-subagent session becomes a first-class row (`blank: false`) carrying
+ * its draft title, so the stock tree renders it — under its workspace, with
+ * the creation-time cell and the row menu (Archive = discard). Subagent
+ * blanks keep their flag (stock hides them by design); rows that need no
+ * change keep their object identity, and when nothing changes the SNAPSHOT
+ * reference is returned untouched — getSnapshot must stay referentially
+ * stable between mutations or every uSES reader re-renders forever.
+ */
+export declare function projectDraftList<T extends SessionListLike>(stock: T, previews: ReadonlyMap<string, string>, fallbackTitle: string): T;
+/** sessionId → overlay title for every projectable draft (DOM marker feed). */
+export declare function draftRowTitles(stock: SessionListLike, previews: ReadonlyMap<string, string>, fallbackTitle: string): Map<string, string>;
+/**
+ * Whether a rendered tree row's visible text is one of the draft titles.
+ * The row's textContent is `title + trailing time label` (menus and hover
+ * cards are portaled away), so a prefix match is the rule. Titles shorter
+ * than 3 characters never match: a 1–2 char preview prefixing an unrelated
+ * workspace label would paint a row that is not a draft.
+ */
+export declare function matchDraftRow(rowText: string, titles: Iterable<string>): boolean;
+/** Cross-generation overlay state plus the memo cell of the shadowed store. */
+export interface DraftRegistry {
+    /** sessionId → live composer preview (empty drafts absent). */
+    readonly previews: Map<string, string>;
+    /** sessionId → current overlay title (the DOM marker's match set). */
+    titles: Map<string, string>;
+    /** Bumped on every overlay-data change; pairs with {@link cache}. */
+    version: number;
+    /** Subscribers of the shadowed store beyond the stock observable's own. */
+    readonly listeners: Set<() => void>;
+    /** getSnapshot memo: (stock identity, version) → projected snapshot. */
+    cache: {
+        input: unknown;
+        version: number;
+        output: SessionListLike;
+    };
+    /**
+     * Stock-snapshot reader seat (set when the store shadow is installed).
+     * Internal derivations — titles, the shell sync — MUST read the STOCK
+     * snapshot: the projected one carries `blank: false` for drafts and would
+     * make every draft-derivation see no drafts at all.
+     */
+    stockGet: (() => SessionListLike) | undefined;
+    /** Store-restore seat while the shadow is installed (unload/HMR dispose). */
+    restoreStore: (() => void) | undefined;
+    /** Marker rescan seat (installed by the DOM effect; emit() pokes it). */
+    rescan: (() => void) | undefined;
+    /** localStorage write debounce timer. */
+    persistTimer: ReturnType<typeof setTimeout> | undefined;
+}
+/** The process-wide draft registry (created once, shared across HMR loads). */
+export declare function draftRegistry(): DraftRegistry;
 /** Resolve the New Session target exactly like the stock policy (minus reuse). */
 export declare function resolveTargetWorkspaceId(workspaces: WorkspaceListLike, sessions: SessionListLike): string | undefined;
 /**
@@ -171,25 +231,51 @@ export declare function installFreshSessions(deps: {
     workspaces: WorkspacesLike;
     sessions: SessionsLike;
 }): () => void;
-/** Props the slot framework composes into the footer action entry. */
-interface DraftsFooterActionProps {
-    readonly wide: boolean;
-    readonly useSessions: <T>(selector: (snapshot: SessionListLike) => T) => T;
-    readonly useWorkspaces: <T>(selector: (snapshot: WorkspaceListLike) => T) => T;
-    readonly t: (key: string, params?: Record<string, string | number>) => string;
-    readonly startSession: () => void;
-    readonly openSession: (sessionId: string) => void;
-    readonly discardSession: (sessionId: string) => void;
-    /** Raw unsent composer text of one draft (undefined when none/unopened). */
-    readonly draftPreviewOf: (sessionId: string) => string | undefined;
-}
-/** Sidebar foot entry: drafts trigger + anchored popover switcher. */
-export declare function DraftsFooterAction(props: DraftsFooterActionProps): ReactNode;
+/**
+ * Install the draft projection on the live sessions service:
+ *
+ * - `getSnapshot` is shadowed to run {@link projectDraftList} over the stock
+ *   snapshot, memoized on (stock identity, overlay version) so the uSES
+ *   contract — same reference between mutations — holds for every reader;
+ * - `subscribe` is shadowed to ALSO notify on overlay-version bumps (the
+ *   stock observable fires on host list changes only; a preview typed into a
+ *   draft changes no host state, yet the row title must move live);
+ * - composer previews: every draft with a materialized input shell (opened
+ *   at least once this page life; scopes of listed sessions persist) is
+ *   subscribed through `conversation.input`, mirrored into the registry and
+ *   localStorage, and pruned the moment the session stops being a draft
+ *   (first send flips `blank` on the host);
+ * - the stock store is observed once so freshly minted drafts recompute the
+ *   DOM marker's title set without waiting for a version bump.
+ *
+ * Everything lives in the Symbol.for registry, so an HMR-reloaded plugin
+ * generation re-attaches to a store shadowed by the previous one and the
+ * data survives the reload.
+ * @returns disposer restoring the stock read faces (no-op when unsupported).
+ */
+export declare function installDraftProjection(deps: {
+    sessions: SessionsLike;
+    conversation: {
+        readonly input: ConversationInputLike;
+    };
+    fallbackTitle: () => string;
+}): () => void;
+/**
+ * Mark rendered draft rows. The row renderer is bundle-internal, so the
+ * identity is painted from the outside: a MutationObserver watches the
+ * document, every pass matches `[role="treeitem"]` rows against the
+ * registry's title set, and CSS does the rest. Purely cosmetic: if the DOM
+ * shape drifts, rows keep working and only lose the tint.
+ * @returns disposer stopping the observer and clearing the marks.
+ */
+export declare function installDraftMarker(): () => void;
 /** Required services (cordis fiber inject). */
 export declare const inject: string[];
 /**
- * Browser plugin entry: stylesheet, dictionaries, the New Session patch, and
- * the drafts switcher registration.
+ * Browser plugin entry: stylesheet, dictionaries, the New Session patch, the
+ * draft projection (visibility + titles + previews), the row marker, and the
+ * Ctrl+Alt+N hotkey. No slots are registered — drafts render through the
+ * stock tree.
  * @param ctx - client root context.
  */
 export declare function apply(ctx: ClientContextLike): void;

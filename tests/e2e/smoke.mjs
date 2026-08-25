@@ -1,8 +1,17 @@
-// E2E smoke: full Cursor-style drafts flow on an isolated DSH instance.
+// E2E smoke: Cursor-style drafts AS TREE ROWS on an isolated DSH instance.
 //
 // Boots a throwaway DSH web host (its own DSH_HOME, a scratch profile with
 // this checkout installed via `dsh plugin add link:`), drives the real web UI
-// in headless Chrome, and asserts the host-side session truth. Self-cleaning.
+// in headless Chrome, and asserts both the host-side session truth and the
+// sidebar tree DOM. Self-cleaning.
+//
+// Covers the v0.2 contract:
+//   - every New Session click (button / folder ＋ / Ctrl+Alt+N) mints a fresh
+//     durable draft; drafts render as ordinary tree rows (marked, gray,
+//     "New Session" title, creation-time cell) — no popover anywhere;
+//   - typing in a draft updates its row title live (unsent-text preview) and
+//     survives a page reload (localStorage mirror; sessions survive the host);
+//   - the stock row menu archives (= discards) a draft.
 //
 // Requirements (skipped with exit 0 when unset — CI runs only unit tests):
 //   E2E_DSH_ROOT  path to a deepseek-harness checkout (default: /home/ilya/deepseek-harness)
@@ -59,7 +68,7 @@ try {
     // pnpm ≥10 blocks the prepare build of a link: dependency unless allowed.
     const yaml = join(home, 'profiles/web/pnpm-workspace.yaml')
     if (add.stderr.includes('allowBuilds') && existsSync(yaml)) {
-      const { appendFileSync, readFileSync } = await import('node:fs')
+      const { appendFileSync } = await import('node:fs')
       const key = /("@ne-ilyxa\/dsh-session-drafts@\S+)"/u.exec(add.stderr)?.[1]
         ?? '"@ne-ilyxa/dsh-session-drafts"'
       appendFileSync(yaml, `allowBuilds:\n  ${key}: true\n`)
@@ -73,8 +82,7 @@ try {
 
   // 2. Boot the scratch host. stdio ignore: a pipe nobody drains fills its
   // 64KB buffer and silently wedges the host mid-boot. detached: own process
-  // group, so teardown kills the whole tree (pnpm -> dsh -> server), not just
-  // the pnpm wrapper.
+  // group, so teardown kills the whole tree (pnpm -> dsh -> server).
   host = spawn('pnpm', ['dsh', 'web', '--no-open', '--port', String(PORT)], {
     cwd: DSH_ROOT,
     env: { ...process.env, ...env },
@@ -115,23 +123,43 @@ try {
       const r = await rpc('session.list', {})
       return (r?.result?.value?.items ?? []).filter(s => s.blank).length
     }
-    const widget = () => page.evaluate(() => ({
-      trigger: document.querySelector('.dsd-trigger') !== null,
-      count: document.querySelector('.dsd-trigger .dsd-count')?.textContent ?? null,
-      panel: document.querySelector('.dsd-panel') !== null,
-      rows: document.querySelectorAll('.dsd-row').length,
-      current: document.querySelectorAll('.dsd-row.dsd-current').length,
-      newBtn: document.querySelector('.dsd-panel .dsd-new') !== null,
-    }))
+
+    // Native clicks only: CDP coordinate clicks never reach the sidebar
+    // (overlay interception) — the honest path is element.click() in page.
     const clickNewSession = () => page.evaluate(() => {
       const btns = [...document.querySelectorAll('button[aria-label="New session"]')]
       btns[btns.length - 1]?.click()
     })
-    const clickSelector = sel => page.evaluate(s => {
-      const el = document.querySelector(s)
-      el?.click()
-      return el !== null
-    }, sel)
+    const draftRows = () => page.evaluate(() =>
+      [...document.querySelectorAll('[role="treeitem"].dsd-draft-row')].map(row => ({
+        text: row.textContent ?? '',
+        selected: row.getAttribute('aria-selected') === 'true',
+      })))
+    // The stock workspace group collapses after 5 rows behind a "Show {n}
+    // more sessions" button — expand before counting or targeting old rows.
+    // One click per round trip: React commits asynchronously, so a
+    // synchronous DOM loop would re-find the same button forever.
+    const expandTree = async () => {
+      for (let i = 0; i < 10; i++) {
+        const clicked = await page.evaluate(() => {
+          const btn = [...document.querySelectorAll('button')]
+            .find(el => (el.textContent ?? '').startsWith('Show ') && el.textContent.includes('more sessions'))
+          if (btn === undefined) return false
+          btn.click()
+          return true
+        })
+        if (!clicked) return
+        await sleep(350)
+      }
+    }
+    const typeDraft = text => page.evaluate(t => {
+      const area = document.querySelector('textarea[data-phase]')
+      if (area === null) throw new Error('no composer textarea')
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+      area.focus()
+      setter?.call(area, t)
+      area.dispatchEvent(new Event('input', { bubbles: true }))
+    }, text)
 
     await page.goto(BASE, { waitUntil: 'networkidle2', timeout: 60_000 })
     await sleep(2500)
@@ -140,87 +168,112 @@ try {
     await page.reload({ waitUntil: 'networkidle2' })
     await sleep(3000)
 
-    // Three New Session clicks -> three independent durable drafts (no reuse).
-    const before = await hostBlanks()
-    for (let i = 0; i < 3; i++) { await clickNewSession(); await sleep(1500) }
-    const after = await hostBlanks()
-    log(`host blank sessions: ${before} -> ${after}`)
-    if (after !== before + 3) fail(`expected +3 durable drafts, got ${before} -> ${after}`)
-
-    // Popover lists them; the footer mints another draft.
-    await clickSelector('.dsd-trigger'); await sleep(700)
-    const w = await widget()
-    log('popover:', JSON.stringify(w))
-    if (w.rows < 3) fail(`popover shows ${w.rows} rows, expected >= 3`)
-
-    await page.evaluate(() => { [...document.querySelectorAll('.dsd-row')].pop()?.click() })
-    await sleep(1200)
-    await clickSelector('.dsd-trigger'); await sleep(700)
-    const lastIsCurrent = await page.evaluate(() => {
-      const rows = [...document.querySelectorAll('.dsd-row')]
-      return rows.length > 0 && rows.at(-1).classList.contains('dsd-current')
-    })
-    if (!lastIsCurrent) fail('switching drafts did not move the current marker')
-
-    // Draft preview: inject unsent text through React's native setter (the
-    // app's focus management deflects CDP typing, so this is the honest path
-    // to a real machine draft), switch to another draft, read the row.
-    const typed = 'preview-e2e Рефакторинг парсера'
-    await page.evaluate(text => {
-      const t = document.querySelector('textarea[data-phase]')
-      if (t === null) throw new Error('no composer textarea')
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
-      t.focus()
-      setter?.call(t, text)
-      t.dispatchEvent(new Event('input', { bubbles: true }))
-    }, typed)
-    await sleep(600)
-    await page.evaluate(() => { [...document.querySelectorAll('.dsd-row')].at(-2)?.click() })
-    await sleep(1200)
-    await clickSelector('.dsd-trigger'); await sleep(800)
-    const previews = await page.evaluate(() =>
-      [...document.querySelectorAll('.dsd-row .dsd-rowPreview')].map(e => e.textContent ?? ''))
-    if (!previews.some(p => p.includes('Рефакторинг'))) {
-      fail(`draft preview missing; previews=${JSON.stringify(previews)}`)
+    // The v0.1 popover is gone entirely: no footer trigger, no panel.
+    const legacy = await page.evaluate(() => ({
+      trigger: document.querySelector('.dsd-trigger') !== null,
+      panel: document.querySelector('.dsd-panel') !== null,
+      rows: document.querySelectorAll('.dsd-row').length,
+    }))
+    if (legacy.trigger || legacy.panel || legacy.rows > 0) {
+      fail(`v0.1 popover leaked: ${JSON.stringify(legacy)}`)
     }
-    // Close the popover (click the row we came from is done; ensure closed).
-    if ((await widget()).panel) { await clickSelector('.dsd-trigger'); await sleep(500) }
 
-    // Hotkeys: Ctrl+Alt+N mints a draft (puppeteer sends physical codes,
-    // which is what the layout-independent matcher reads). Before that,
-    // install a worst-case reproduction of the environment that killed the
-    // bubble-phase listener in the wild: a document-capture guard that
-    // stopPropagation()s unconditionally (dsh-better-sidebar's IME guard
-    // does exactly this under Linux IBus, where every keydown carries
-    // keyCode 229). The window-capture listener must still see the event.
+    // --- Three New Session clicks -> three MORE durable drafts, all visible.
+    // `before` counts whatever the boot's initial workspace selection minted
+    // (with reuse neutralized, connecting the recent workspace at boot also
+    // mints one draft — accepted Cursor semantics).
+    const before = await hostBlanks()
+    for (let i = 0; i < 3; i++) { await clickNewSession(); await sleep(1200) }
+    let blanks = await hostBlanks()
+    log(`host blank sessions: ${before} -> ${blanks}`)
+    if (blanks !== before + 3) fail(`expected +3 durable drafts, got ${before} -> ${blanks}`)
+    let rows = await draftRows()
+    log('draft rows:', JSON.stringify(rows))
+    if (rows.length !== before + 3) fail(`tree shows ${rows.length} draft rows, expected ${before + 3}`)
+    if (!rows.every(r => r.text.startsWith('New Session'))) fail('draft row title is not "New Session"')
+    // Creation-time cell: the row carries a trailing time label after the title.
+    if (!rows.some(r => r.text.length > 'New Session'.length)) fail('draft row missing creation-time label')
+    if (rows.filter(r => r.selected).length !== 1) fail('exactly one draft row must be selected')
+
+    // --- Live preview: typing in the current draft retitles its row.
+    const typed = 'preview-e2e Рефакторинг парсера'
+    await typeDraft(typed)
+    await sleep(800)
+    rows = await draftRows()
+    const previewRow = rows.find(r => r.text.includes('Рефакторинг'))
+    if (previewRow === undefined) fail(`draft preview missing in tree; rows=${JSON.stringify(rows)}`)
+    else if (!previewRow.selected) fail('preview retitled the wrong (non-current) row')
+    else log('live preview row:', previewRow.text)
+
+    // --- Reload: drafts persist host-side, preview persists via the mirror.
+    await page.reload({ waitUntil: 'networkidle2' })
+    await sleep(3500)
+    blanks = await hostBlanks()
+    rows = await draftRows()
+    log(`after reload: host blanks=${blanks}, draft rows=${rows.length}`)
+    if (blanks !== before + 3) fail(`drafts did not survive reload host-side (${blanks})`)
+    if (rows.length !== before + 3) fail(`draft rows after reload: ${rows.length}, expected ${before + 3}`)
+    if (!rows.some(r => r.text.includes('Рефакторинг'))) {
+      fail(`preview did not survive reload; rows=${JSON.stringify(rows)}`)
+    }
+
+    // --- Folder ＋ mint: a fourth draft in the same workspace. Hover styles
+    // hide the ＋ until row hover, but a native click on the hidden button
+    // still dispatches.
+    await page.evaluate(() => {
+      document.querySelector('button[aria-label^="New session in"]')?.click()
+    })
+    await sleep(1500)
+    if ((await hostBlanks()) !== before + 4) fail('folder ＋ did not mint a fresh draft')
+    if ((await draftRows()).length !== before + 4) fail('folder-minted draft not visible in tree')
+
+    // --- Hotkey: Ctrl+Alt+N mints from anywhere. First install the
+    // worst-case environment that killed bubble-phase listeners in the wild:
+    // a document-capture guard that stopPropagation()s unconditionally
+    // (dsh-better-sidebar's IME guard does exactly this under Linux IBus).
     await page.evaluate(() => {
       const guard = event => { event.stopPropagation() }
       document.addEventListener('keydown', guard, true)
       document.addEventListener('keyup', guard, true)
     })
-    const beforeHotkey = await hostBlanks()
     await page.keyboard.down('Control'); await page.keyboard.down('Alt')
     await page.keyboard.press('KeyN')
     await page.keyboard.up('Alt'); await page.keyboard.up('Control')
-    await sleep(2000)
-    if (await hostBlanks() !== beforeHotkey + 1) fail('Ctrl+Alt+N did not mint a draft')
-    // Ctrl+Alt+D toggles the popover open.
-    await page.keyboard.down('Control'); await page.keyboard.down('Alt')
-    await page.keyboard.press('KeyD')
-    await page.keyboard.up('Alt'); await page.keyboard.up('Control')
-    await sleep(800)
-    if (!(await widget()).panel) fail('Ctrl+Alt+D did not open the popover')
-    await page.keyboard.down('Control'); await page.keyboard.down('Alt')
-    await page.keyboard.press('KeyD')
-    await page.keyboard.up('Alt'); await page.keyboard.up('Control')
-    await sleep(600)
-
-
-    if (!(await widget()).panel) { await clickSelector('.dsd-trigger'); await sleep(600) }
-    const viaPanel = await clickSelector('.dsd-panel .dsd-new')
     await sleep(1800)
-    if (!viaPanel) fail('panel footer New Session missing')
-    log('host blanks after panel new:', await hostBlanks())
+    if ((await hostBlanks()) !== before + 5) fail('Ctrl+Alt+N did not mint a draft')
+    await expandTree(); await sleep(400)
+    if ((await draftRows()).length !== before + 5) fail('hotkey-minted draft not visible in tree')
+
+    // --- Archive (= discard) via the stock row menu on the preview draft.
+    // Note: archived sessions STAY in session.list host-side (the archive is
+    // a registry-global hide set; the accounting slot remains), so the honest
+    // postcondition is the row disappearing from the tree.
+    await expandTree(); await sleep(400)
+    const archived = await page.evaluate(() => {
+      const row = [...document.querySelectorAll('[role="treeitem"].dsd-draft-row')]
+        .find(r => (r.textContent ?? '').includes('Рефакторинг'))
+      if (row === undefined) return 'row not found'
+      const trigger = row.querySelector('button[aria-label^="Session actions for"]')
+      if (trigger === null) return 'menu trigger not found'
+      trigger.click()
+      return 'opened'
+    })
+    await sleep(600)
+    if (archived !== 'opened') fail(`row menu: ${archived}`)
+    else {
+      const clicked = await page.evaluate(() => {
+        const item = [...document.querySelectorAll('button, [role="menuitem"]')]
+          .find(el => (el.textContent ?? '').trim() === 'Archive session')
+        if (item === undefined) return false
+        item.click()
+        return true
+      })
+      await sleep(1500)
+      if (!clicked) fail('Archive session menu item not found')
+      else if ((await draftRows()).length !== before + 4) fail('archived draft row still rendered')
+      else if (!(await draftRows()).every(r => !r.text.includes('Рефакторинг'))) fail('preview draft row survived archive')
+      else log('archive discarded the preview draft; tree rows back to', before + 4)
+    }
 
     const relevant = problems.filter(l => !l.includes('favicon'))
     if (relevant.length > 0) { fail(`console problems: ${relevant.slice(0, 3).join(' | ')}`) }
