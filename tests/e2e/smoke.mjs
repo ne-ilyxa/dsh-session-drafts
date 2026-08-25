@@ -135,23 +135,6 @@ try {
         text: row.textContent ?? '',
         selected: row.getAttribute('aria-selected') === 'true',
       })))
-    // The stock workspace group collapses after 5 rows behind a "Show {n}
-    // more sessions" button — expand before counting or targeting old rows.
-    // One click per round trip: React commits asynchronously, so a
-    // synchronous DOM loop would re-find the same button forever.
-    const expandTree = async () => {
-      for (let i = 0; i < 10; i++) {
-        const clicked = await page.evaluate(() => {
-          const btn = [...document.querySelectorAll('button')]
-            .find(el => (el.textContent ?? '').startsWith('Show ') && el.textContent.includes('more sessions'))
-          if (btn === undefined) return false
-          btn.click()
-          return true
-        })
-        if (!clicked) return
-        await sleep(350)
-      }
-    }
     const typeDraft = text => page.evaluate(t => {
       const area = document.querySelector('textarea[data-phase]')
       if (area === null) throw new Error('no composer textarea')
@@ -178,24 +161,31 @@ try {
       fail(`v0.1 popover leaked: ${JSON.stringify(legacy)}`)
     }
 
-    // --- Three New Session clicks -> three MORE durable drafts, all visible.
-    // `before` counts whatever the boot's initial workspace selection minted
-    // (with reuse neutralized, connecting the recent workspace at boot also
-    // mints one draft — accepted Cursor semantics).
-    const before = await hostBlanks()
-    for (let i = 0; i < 3; i++) { await clickNewSession(); await sleep(1200) }
-    let blanks = await hostBlanks()
-    log(`host blank sessions: ${before} -> ${blanks}`)
-    if (blanks !== before + 3) fail(`expected +3 durable drafts, got ${before} -> ${blanks}`)
+    // --- Settle: one click guarantees an EMPTY draft exists and is current
+    // (mint on a cold profile, jump on a warm one). `base` counts host-side
+    // blank sessions — note the host flag means "no message SENT": typing
+    // unsent text does NOT flip it, so blanks grow only on real mints.
+    await clickNewSession(); await sleep(1500)
+    const base = await hostBlanks()
+    if (base < 1) fail('no draft after the first New Session click')
     let rows = await draftRows()
-    log('draft rows:', JSON.stringify(rows))
-    if (rows.length !== before + 3) fail(`tree shows ${rows.length} draft rows, expected ${before + 3}`)
-    if (!rows.every(r => r.text.startsWith('New Session'))) fail('draft row title is not "New Session"')
+    log(`base: host blanks=${base}, draft rows=${rows.length}`)
+    if (rows.length !== base) fail(`tree shows ${rows.length} draft rows, expected ${base}`)
+    if (!rows.every(r => r.text.startsWith('New Session'))) fail('empty draft row title is not "New Session"')
     // Creation-time cell: the row carries a trailing time label after the title.
     if (!rows.some(r => r.text.length > 'New Session'.length)) fail('draft row missing creation-time label')
     if (rows.filter(r => r.selected).length !== 1) fail('exactly one draft row must be selected')
 
-    // --- Live preview: typing in the current draft retitles its row.
+    // --- Empty-draft jump: with an empty draft already there, the click must
+    // NOT mint — it lands on the empty placeholder.
+    await clickNewSession(); await sleep(1300)
+    if ((await hostBlanks()) !== base) fail('click minted while an EMPTY draft existed (reuse failed)')
+    rows = await draftRows()
+    if (rows.length !== base) fail(`draft rows after reuse jump: ${rows.length}, expected ${base}`)
+    if (rows.filter(r => r.selected).length !== 1) fail('selection lost after the reuse jump')
+
+    // --- Live preview: typing in the current draft retitles its row AND
+    // occupies it.
     const typed = 'preview-e2e Рефакторинг парсера'
     await typeDraft(typed)
     await sleep(800)
@@ -205,32 +195,57 @@ try {
     else if (!previewRow.selected) fail('preview retitled the wrong (non-current) row')
     else log('live preview row:', previewRow.text)
 
-    // --- Reload: drafts persist host-side, preview persists via the mirror.
+    // --- Occupied: the click now MINTS a fresh empty draft (no infinite
+    // empties, no swallowed drafts).
+    await clickNewSession(); await sleep(1600)
+    let blanks = await hostBlanks()
+    if (blanks !== base + 1) fail(`expected exactly one mint after occupation, got ${base} -> ${blanks}`)
+    rows = await draftRows()
+    if (rows.length !== base + 1) fail(`draft rows after mint: ${rows.length}, expected ${base + 1}`)
+    const occupied = rows.filter(r => r.text.includes('Рефакторинг'))
+    if (occupied.length !== 1) fail('the occupied draft did not stay in the tree')
+    if (occupied[0].selected) fail('the minted empty draft is not the selected one')
+
+    // --- The fresh draft is empty again: one more click jumps, no mint.
+    await clickNewSession(); await sleep(1300)
+    if ((await hostBlanks()) !== base + 1) fail('click minted while the fresh EMPTY draft existed')
+
+    // --- Reload: drafts persist host-side, the preview persists via the
+    // localStorage mirror, and the current (empty) draft is restored.
+    const storedBefore = await page.evaluate(() =>
+      localStorage.getItem('dsh.plugin.session-drafts.previews'))
+    log('stored previews BEFORE reload:', storedBefore)
     await page.reload({ waitUntil: 'networkidle2' })
     await sleep(3500)
+    const storedAfter = await page.evaluate(() =>
+      localStorage.getItem('dsh.plugin.session-drafts.previews'))
+    log('stored previews AFTER reload:', storedAfter)
     blanks = await hostBlanks()
     rows = await draftRows()
     log(`after reload: host blanks=${blanks}, draft rows=${rows.length}`)
-    if (blanks !== before + 3) fail(`drafts did not survive reload host-side (${blanks})`)
-    if (rows.length !== before + 3) fail(`draft rows after reload: ${rows.length}, expected ${before + 3}`)
+    if (blanks !== base + 1) fail(`drafts did not survive reload host-side (${blanks})`)
+    if (rows.length !== base + 1) fail(`draft rows after reload: ${rows.length}, expected ${base + 1}`)
     if (!rows.some(r => r.text.includes('Рефакторинг'))) {
       fail(`preview did not survive reload; rows=${JSON.stringify(rows)}`)
     }
 
-    // --- Folder ＋ mint: a fourth draft in the same workspace. Hover styles
-    // hide the ＋ until row hover, but a native click on the hidden button
-    // still dispatches.
+    // --- Folder ＋: the restored current draft is the empty one, so occupy
+    // it first — then the folder ＋ (same workspace) must mint. Hover styles
+    // hide the ＋ until row hover, but a native click still dispatches.
+    await typeDraft('folder-occupy'); await sleep(700)
     await page.evaluate(() => {
       document.querySelector('button[aria-label^="New session in"]')?.click()
     })
-    await sleep(1500)
-    if ((await hostBlanks()) !== before + 4) fail('folder ＋ did not mint a fresh draft')
-    if ((await draftRows()).length !== before + 4) fail('folder-minted draft not visible in tree')
+    await sleep(1600)
+    if ((await hostBlanks()) !== base + 2) fail('folder ＋ did not mint after occupation')
+    if ((await draftRows()).length !== base + 2) fail('folder-minted draft not visible in tree')
 
-    // --- Hotkey: Ctrl+Alt+N mints from anywhere. First install the
-    // worst-case environment that killed bubble-phase listeners in the wild:
-    // a document-capture guard that stopPropagation()s unconditionally
-    // (dsh-better-sidebar's IME guard does exactly this under Linux IBus).
+    // --- Hotkey: occupy the fresh draft, then Ctrl+Alt+N mints. First
+    // install the worst-case environment that killed bubble-phase listeners
+    // in the wild: a document-capture guard that stopPropagation()s
+    // unconditionally (dsh-better-sidebar's IME guard does exactly this
+    // under Linux IBus).
+    await typeDraft('hotkey-occupy'); await sleep(700)
     await page.evaluate(() => {
       const guard = event => { event.stopPropagation() }
       document.addEventListener('keydown', guard, true)
@@ -240,15 +255,19 @@ try {
     await page.keyboard.press('KeyN')
     await page.keyboard.up('Alt'); await page.keyboard.up('Control')
     await sleep(1800)
-    if ((await hostBlanks()) !== before + 5) fail('Ctrl+Alt+N did not mint a draft')
-    await expandTree(); await sleep(400)
-    if ((await draftRows()).length !== before + 5) fail('hotkey-minted draft not visible in tree')
+    if ((await hostBlanks()) !== base + 3) fail('Ctrl+Alt+N did not mint after occupation')
+    // With the minted draft empty, the SAME hotkey jumps — no mint.
+    await page.keyboard.down('Control'); await page.keyboard.down('Alt')
+    await page.keyboard.press('KeyN')
+    await page.keyboard.up('Alt'); await page.keyboard.up('Control')
+    await sleep(1500)
+    if ((await hostBlanks()) !== base + 3) fail('Ctrl+Alt+N minted while an EMPTY draft existed')
+    if ((await draftRows()).length !== base + 3) fail('hotkey drafts not visible in tree')
 
     // --- Archive (= discard) via the stock row menu on the preview draft.
     // Note: archived sessions STAY in session.list host-side (the archive is
     // a registry-global hide set; the accounting slot remains), so the honest
     // postcondition is the row disappearing from the tree.
-    await expandTree(); await sleep(400)
     const archived = await page.evaluate(() => {
       const row = [...document.querySelectorAll('[role="treeitem"].dsd-draft-row')]
         .find(r => (r.textContent ?? '').includes('Рефакторинг'))
@@ -270,9 +289,9 @@ try {
       })
       await sleep(1500)
       if (!clicked) fail('Archive session menu item not found')
-      else if ((await draftRows()).length !== before + 4) fail('archived draft row still rendered')
+      else if ((await draftRows()).length !== base + 2) fail('archived draft row still rendered')
       else if (!(await draftRows()).every(r => !r.text.includes('Рефакторинг'))) fail('preview draft row survived archive')
-      else log('archive discarded the preview draft; tree rows back to', before + 4)
+      else log('archive discarded the preview draft; tree rows back to', base + 2)
     }
 
     const relevant = problems.filter(l => !l.includes('favicon'))

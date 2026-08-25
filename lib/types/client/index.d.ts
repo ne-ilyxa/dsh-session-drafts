@@ -3,12 +3,14 @@
  *
  * Cursor-style drafts, fully in-tree (no popover, no popup menu):
  *
- * 1. Fresh drafts — `workspaces.startSession` (every New Session surface:
- *    the sidebar button, the folder ＋, the workspace picker) is patched on
- *    the live WorkspaceRuntime instance to ALWAYS mint a fresh durable blank
- *    session on the host (`session.create` persists the Session entity
- *    before any message) and open it. Several empty chats per workspace
- *    coexist in Session persistence and survive host restarts.
+ * 1. Never stack empty drafts — `workspaces.startSession` (every New Session
+ *    surface: the sidebar button, the folder ＋, the workspace picker) is
+ *    patched on the live WorkspaceRuntime instance with the Cursor rule: a
+ *    click first jumps to the workspace's existing EMPTY draft (a blank
+ *    session whose composer carries no unsent text) and only mints a fresh
+ *    durable session (`session.create` persists the Session entity before
+ *    any message) when every draft is occupied. Typed drafts stay put as
+ *    their own chats; empty placeholders never multiply.
  *
  * 2. Draft projection — the stock tree hides blank sessions other than the
  *    current one (`sessionVisible`: blank ⇒ visible only when current), so
@@ -50,7 +52,7 @@
  * @module @ne-ilyxa/dsh-session-drafts/client
  */
 /** Session-list row facts the draft projection reads and rewrites. */
-interface SessionRowLike {
+export interface SessionRowLike {
     readonly id: string;
     readonly blank: boolean;
     readonly cwd?: string;
@@ -105,12 +107,18 @@ interface WorkspacesLike {
     };
     startSession(workspaceId?: string): void;
 }
+/** Workspace row facts the empty-draft reuse scan reads. */
+interface WorkspaceLike {
+    readonly workspaceId: string;
+    /** Backing directory (cwd of its minted drafts); absent in stripped shapes. */
+    readonly path?: string;
+    readonly sessionIds: readonly string[];
+}
 /** workspaces.list snapshot facts the patch reads. */
 interface WorkspaceListLike {
-    readonly items: readonly {
-        readonly workspaceId: string;
-        readonly sessionIds: readonly string[];
-    }[];
+    readonly items: readonly WorkspaceLike[];
+    /** Registry-global archive set (members are never reused); absent in old shapes. */
+    readonly archivedSessionIds?: readonly string[];
     readonly recentWorkspaceId: string | undefined;
 }
 /** Locale registration and binding face (the locale plugin's product). */
@@ -220,11 +228,35 @@ export declare function draftRegistry(): DraftRegistry;
 /** Resolve the New Session target exactly like the stock policy (minus reuse). */
 export declare function resolveTargetWorkspaceId(workspaces: WorkspaceListLike, sessions: SessionListLike): string | undefined;
 /**
- * Patch one live WorkspaceRuntime instance so `startSession` always creates a
- * fresh blank session on the host and opens it (the stock method reuses the
- * workspace's existing blank session, capping empty chats at one per
- * workspace). The resolution policy (explicit → current Session's workspace →
+ * Find the draft New Session should JUMP to instead of minting: the newest
+ * EMPTY draft of the target workspace. A draft is empty when its composer
+ * carries no unsent text — exactly the absence of a live preview
+ * ({@link DraftRegistry.previews}, kept in sync with the input shells and
+ * persisted across reloads). Occupied drafts (typed text) are skipped: they
+ * stay put as their own chats and the click mints a fresh one — the Cursor
+ * rule that empty placeholders never stack. Membership follows the host's
+ * own account (sessionIds), the stock reuse guards apply (same cwd when both
+ * are known, never an archived session), and subagent blanks are ignored as
+ * everywhere in this plugin. Newest first, id as the deterministic tiebreak.
+ */
+export declare function findReusableEmptyDraft(stock: SessionListLike, workspaces: WorkspaceListLike, previews: ReadonlyMap<string, string>, workspaceId: string): SessionRowLike | undefined;
+/**
+ * Patch one live WorkspaceRuntime instance with the Cursor New Session rule:
+ * **never stack empty drafts**. A click first looks for an existing EMPTY
+ * draft of the target workspace (no unsent composer text — see
+ * {@link findReusableEmptyDraft}) and opens it; only when every draft is
+ * occupied (or none exists) does it mint a fresh durable session on the host
+ * (`session.create`) and open that. The stock method, by contrast, reuses
+ * the workspace's blank session regardless of typed text, capping empty
+ * chats at one per workspace and silently discarding the draft you were
+ * writing. The resolution policy (explicit → current Session's workspace →
  * recent workspace; clear the selection when none exists) is preserved.
+ *
+ * The reuse scan reads the STOCK list snapshot: the public `getSnapshot` is
+ * shadowed by the draft projection once {@link installDraftProjection} is
+ * live (blank drafts carry `blank: false` there and would be invisible to
+ * the scan), so the registry's stock seat is preferred with the public face
+ * as the pre-install fallback.
  * @returns disposer restoring the stock method (no-op when unsupported).
  */
 export declare function installFreshSessions(deps: {

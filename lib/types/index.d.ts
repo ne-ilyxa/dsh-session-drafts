@@ -8,12 +8,13 @@
  * (the client-modules scanner keys off loaded plugin packages that declare
  * `dsh.client` in their manifest).
  *
- * What the client half does (v0.2, no popover): every New Session click
- * mints a fresh durable blank session on the host (`session.create`) instead
- * of reusing the workspace's single blank, and the sessions list snapshot is
- * overlaid so every draft renders as an ordinary sidebar tree row — draft
- * title (live unsent-text preview, persisted), creation time, stock row menu
- * (Archive = discard), gray tint + pencil mark. Cursor-style chat list.
+ * What the client half does (v0.3, no popover): New Session never stacks
+ * empty drafts — it jumps to the workspace's existing EMPTY draft (no unsent
+ * composer text) and only mints a fresh durable session (`session.create`)
+ * when every draft is occupied; the sessions list snapshot is overlaid so
+ * every draft renders as an ordinary sidebar tree row — draft title (live
+ * unsent-text preview, persisted), creation time, stock row menu (Archive =
+ * discard), gray tint + pencil mark. Cursor-style chat list.
  * @module @ne-ilyxa/dsh-session-drafts
  */
 import type { Context } from '@deepseek-ai/cordis';

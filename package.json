@@ -1,7 +1,7 @@
 {
   "name": "@ne-ilyxa/dsh-session-drafts",
-  "version": "0.2.0",
-  "description": "Cursor-style drafts for DeepSeek Harness: every New Session mints a persistent draft chat that lives in the sidebar tree with live preview titles, a gray tint and a pencil mark — no popup, no drafts menu",
+  "version": "0.3.0",
+  "description": "Cursor-style draft chats for DeepSeek Harness: New Session reuses the empty draft or mints a fresh one (never stacks empties); drafts live in the sidebar tree with live preview titles, gray tint and a pencil mark",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ne-ilyxa/dsh-session-drafts.git"
