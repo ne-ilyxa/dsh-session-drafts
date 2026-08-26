@@ -1,6 +1,6 @@
 {
   "name": "@ne-ilyxa/dsh-session-drafts",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Cursor-style drafts for DeepSeek Harness: New Session reuses the empty draft or mints a fresh one; drafts live in the sidebar tree with live preview titles, a gray tint and a single × to discard",
   "repository": {
     "type": "git",

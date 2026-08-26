@@ -4,13 +4,16 @@
 // `dsh plugin add link:`), drives the real UI in headless Chrome into a
 // representative drafts state, and shoots the sidebar:
 //
-//   assets/drafts-tree.png    two drafts as tree rows — the current empty one
-//                             ("New Session", pencil mark, creation time) and
-//                             an occupied one retitled to its live unsent-text
-//                             preview
-//   assets/draft-discard.png  the same list with a row hovered: the × discard
-//                             button revealed in the trailing cell (where
-//                             ordinary chats show their ⋯ menu)
+//   assets/drafts-popover.png   two drafts as tree rows — the current empty
+//                               one ("New Session", pencil mark, creation
+//                               time) and an occupied one retitled to its
+//                               live unsent-text preview
+//   assets/drafts-switched.png  the same list with a row hovered: the ×
+//                               discard button revealed in the trailing cell
+//                               (where ordinary chats show their ⋯ menu)
+//
+// The filenames are stable on purpose: the plugin-market catalog references
+// them by URL, so a re-shoot replaces the committed files in place.
 //
 // Requirements mirror tests/e2e/smoke.mjs (E2E_DSH_ROOT, CHROME_PATH, PORT).
 // Run: node scripts/capture-screens.mjs
@@ -140,7 +143,7 @@ try {
       }
     })
     log('clip:', JSON.stringify(clip))
-    await page.screenshot({ path: join(REPO_ROOT, 'assets/drafts-tree.png'), clip })
+    await page.screenshot({ path: join(REPO_ROOT, 'assets/drafts-popover.png'), clip })
 
     // Hover the occupied (preview) row: the × reveals in the trailing cell.
     const box = await page.evaluate(() => {
@@ -168,8 +171,8 @@ try {
     })
     if (!xVisible) throw new Error('the × discard button is not visible under hover — shot would be misleading')
     log('× visible under hover: ok')
-    await page.screenshot({ path: join(REPO_ROOT, 'assets/drafts-discard.png'), clip })
-    log('wrote assets/drafts-tree.png and assets/drafts-discard.png')
+    await page.screenshot({ path: join(REPO_ROOT, 'assets/drafts-switched.png'), clip })
+    log('wrote assets/drafts-popover.png and assets/drafts-switched.png')
   } finally {
     await browser.close()
   }
