@@ -22,10 +22,10 @@
  *    The stock tree then renders every draft as a first-class row under its
  *    workspace: creation time on the trailing cell (updatedAt of a blank
  *    session is its creation time — nothing moves it), and click to open.
- *    A draft is a placeholder, not a chat: its stock ⋯ menu
- *    (Rename/Fork/Archive) is muted and a single × discards it (see 3).
- *    The same
- *    overlay feeds `workspaces.connectWorkspace`'s reuse scan (it reads
+ *    A draft is a placeholder, not a chat: its stock row controls
+ *    (⋯ menu, archive/pin row buttons) are muted and a single × discards
+ *    it (see 3). The same
+ *    overlay feeds `uiWorkspace.connectWorkspace`'s reuse scan (it reads
  *    `sessions.list` too), so the hero workspace picker also stops reusing
  *    the workspace's old blank and mints a fresh draft — Cursor semantics.
  *
@@ -33,19 +33,33 @@
  *    style) when one exists — read through `conversation.input` shells and
  *    mirrored to localStorage so previews survive reloads — the explicit
  *    rename when the user pinned one, and the localized "New Session"
- *    otherwise. The moment the first message is sent, the host flips
- *    `blank` itself; the overlay stops touching the row and it becomes an
- *    ordinary chat.
+ *    otherwise. The title is written to BOTH summary faces the tree reads:
+ *    `title` (the renderer's row label since the 0.2 refactor:
+ *    `node.title || t('session.untitled')`) and `displayTitle` (the
+ *    archive-confirm and hover-copy surfaces). The moment the first message
+ *    is sent, the host flips `blank` itself; the overlay stops touching the
+ *    row and it becomes an ordinary chat.
  *
  * 3. Draft look — the row renderer is bundle-internal (no slots exist at
  *    row level), so the visual draft identity (gray title, pencil icon in
  *    the empty status slot) is painted by a MutationObserver that marks
  *    matching `[role="treeitem"]` rows with a class; theme-aware DSH
- *    design tokens do the coloring. Purely cosmetic and self-healing: if
- *    the DOM shape changes, rows keep working and just lose the tint.
+ *    design tokens do the coloring. Row identity is read from the explicit
+ *    `data-row-key="session:<id>"` attribute (0.2-era rows carry it), with
+ *    the React-fiber walk (`SessionNodeItem.props.node`) as the fallback.
+ *    The gray tint targets the title span directly: since 0.2 the stock
+ *    `.sessionRow .title` rule carries its own explicit color, so a color
+ *    on the row element alone no longer shows through. Purely cosmetic and
+ *    self-healing: if the DOM shape changes, rows keep working and just
+ *    lose the tint.
  *
  * 4. Ctrl+Alt+N mints a new draft from anywhere (kept from v0.1; the
- *    Ctrl+Alt+D popover toggle died with the popover).
+ *    Ctrl+Alt+D popover toggle died with the popover). Since the 0.2
+ *    refactor the mint flow lives on the `uiWorkspace` navigation service
+ *    (`ctx.uiWorkspace.startSession` → `openWorkspace` → `connectWorkspace`);
+ *    the empty-draft rule patches THAT `connectWorkspace` — the funnel every
+ *    mint path (button, folder ＋, hotkey, boot selection, hero picker)
+ *    goes through.
  *
  * Patch discipline: instance-level property shadowing guarded by
  * `Symbol.for` markers (idempotent across HMR), restored on fiber unload,
@@ -70,13 +84,30 @@ export interface SessionRowLike {
   readonly title?: string
   /** Stock display projection (explicit title → cwd basename → id). */
   readonly displayTitle?: string
+  /**
+   * Local main-view retention counts; the CURRENT session is the row with
+   * `retainedBy.mainView > 0` (the 0.2 face — the snapshot's own `current`
+   * field is gone). Optional for the 0.1-era snapshots that still carried
+   * `current`.
+   */
+  readonly retainedBy?: { readonly mainView?: number }
+  /**
+   * Host-computed projection values riding the row; the plugin reads the
+   * `sessionListMetadata` block — the host's honest "the folded prefix
+   * contains no turn" fact (the 0.2 client `blank` bit no longer means
+   * that: retention and opening flip it).
+   */
+  readonly projectionValues?: {
+    readonly sessionListMetadata?: { readonly blank?: boolean } | undefined
+  } | undefined
 }
 
 /** sessions.list snapshot facts the draft projection reads. */
 interface SessionListLike {
   readonly ids: readonly string[]
   readonly byId: Readonly<Record<string, SessionRowLike | undefined>>
-  readonly current: string | undefined
+  /** Legacy 0.1-era current-session field; superseded by retainedBy (see mainSessionIdOf). */
+  readonly current?: string | undefined
 }
 
 /**
@@ -91,13 +122,15 @@ interface SnapshotStoreLike<T> {
   subscribe(fn: () => void): () => void
 }
 
-/** The sessions service face the patches and the mirror use. */
+/** The sessions service face the projection and the mirror use. */
 interface SessionsLike {
   readonly list: SnapshotStoreLike<SessionListLike>
-  create(opts: { workspaceId?: string; cwd?: string }): Promise<string>
-  open(id: string): void
-  clear(): void
-  /** Session scope for facade access (undefined until the session is opened). */
+  /**
+   * Create (or adopt, with a preallocated `sessionId`) a Host session —
+   * the single mint/adoption primitive the patched connect uses.
+   */
+  create(opts: { workspaceId?: string; cwd?: string; sessionId?: string }): Promise<string>
+  /** Session scope for facade access (undefined until the session is retained). */
   scope?(sessionId: string): unknown | undefined
 }
 
@@ -108,19 +141,26 @@ interface ConversationInputLike {
   }
 }
 
-/** The workspaces service face the patch and the discard wiring use. */
+/** The workspaces controller face the projection and the discard wiring use. */
 interface WorkspacesLike {
   readonly list: { getSnapshot(): WorkspaceListLike }
-  startSession(workspaceId?: string): void
-  /**
-   * Connect a Workspace's draft: reuse-or-create its blank session. Every
-   * mint path funnels here (stock `startSession`, the boot initial
-   * selection, the hero workspace picker) — which is why the empty-draft
-   * rule patches THIS seat, not just `startSession`.
-   */
-  connectWorkspace?(workspaceId: string): Promise<string>
   /** Archive (discard) a session: the row hides, the session log remains. */
   archiveSession(sessionId: string): Promise<void>
+}
+
+/**
+ * The uiWorkspace navigation service face (the 0.2 home of the mint flow —
+ * it moved off the workspace controller). Every New Session surface funnels
+ * through {@link connectWorkspace}: stock `startSession` → `openWorkspace`,
+ * the boot initial selection, and the hero workspace picker all land here.
+ */
+export interface UiWorkspaceLike {
+  /** New Session flow: resolve the target Workspace, connect, open. */
+  startSession(workspaceId?: string): void
+  /** Reuse-or-create the Workspace's blank session (the patch seat). */
+  connectWorkspace(workspaceId: string): Promise<string>
+  /** Archive with main-selection cleanup when the archived one is current. */
+  archiveSession?(sessionId: string, options?: { readonly stopActivity?: boolean }): Promise<void>
 }
 
 /** Workspace row facts the empty-draft reuse scan reads. */
@@ -136,7 +176,6 @@ interface WorkspaceListLike {
   readonly items: readonly WorkspaceLike[]
   /** Registry-global archive set (members are never reused); absent in old shapes. */
   readonly archivedSessionIds?: readonly string[]
-  readonly recentWorkspaceId: string | undefined
 }
 
 /** Locale registration and binding face (the locale plugin's product). */
@@ -150,6 +189,8 @@ interface LocaleLike {
 export interface ClientContextLike {
   readonly sessions: SessionsLike
   readonly workspaces: WorkspacesLike
+  /** The 0.2 navigation service (mint flow); absent on 0.1-era runtimes. */
+  readonly uiWorkspace?: UiWorkspaceLike
   readonly locale: LocaleLike
   readonly conversation: { readonly input: ConversationInputLike }
   effect(setup: () => (() => void) | void, label?: string): (() => void) | void
@@ -215,18 +256,73 @@ export function draftPreview(text: string, max = 60): string | undefined {
   return collapsed.length <= max ? collapsed : `${collapsed.slice(0, max).trimEnd()}…`
 }
 
-/** Whether a summary row is a projectable draft (blank, not a subagent child). */
+/**
+ * Whether a summary row is a projectable draft — a session with NO SENT
+ * turn (a subagent child is never one). The host's `sessionListMetadata
+ * .blank` ("the folded prefix contains no turn") is the honest signal on
+ * every face: the 0.2 client `blank` bit flips the moment a session is
+ * retained and opened ("engaged"), so the CURRENT empty draft and a
+ * graduated chat both carry `blank: false` there and only the metadata
+ * tells them apart.
+ *
+ * Three shapes, in order of certainty:
+ * - `blank: true` — never engaged, nothing sent: an empty placeholder.
+ * - `blank: false` + host metadata `blank: true` — opened but never
+ *   prompted: still a draft (its row shows the preview/New Session and
+ *   carries the × like any other).
+ * - host metadata absent — engagement truth alone cannot tell an empty
+ *   draft from a real chat, so the row is NOT projected; the metadata
+ *   block lands with the list projections and the next snapshot re-derives.
+ */
 function isDraft(summary: SessionRowLike): boolean {
-  return summary.blank && summary.origin !== 'subagent'
+  if (summary.origin === 'subagent') return false
+  if (summary.blank === true) return true
+  return summary.projectionValues?.sessionListMetadata?.blank === true
 }
 
-/** Overlay title of one draft: live preview, then pinned title, then stock. */
+/**
+ * The CURRENT session of a list snapshot: the row the main view retains
+ * (`retainedBy.mainView > 0` — the 0.2 derivation, mirroring the stock
+ * `mainSessionId`), with the legacy `current` field as the 0.1-era
+ * fallback. The plugin reads the current session only to subscribe its
+ * composer shell (typing happens in the open conversation).
+ */
+export function mainSessionIdOf(list: SessionListLike): string | undefined {
+  for (const summary of Object.values(list.byId)) {
+    if (summary !== undefined && (summary.retainedBy?.mainView ?? 0) > 0) return summary.id
+  }
+  return list.current
+}
+
+/**
+ * Brand on rows this projection itself produced; the value is the row's
+ * ORIGINAL client `blank` bit. The overlay must be idempotent over its own
+ * output: a re-captured snapshot face (an HMR generation dance can leave a
+ * projected face where the raw one was captured) feeds the projection back
+ * its own rows, and without the brand the previously written `title` would
+ * read as a user rename — permanently freezing the row title.
+ */
+export const PROJECTED_ROW = Symbol.for('@ne-ilyxa/dsh-session-drafts/projected-row')
+
+/** The row's original client `blank` bit (face-independent). */
+function originalBlankOf(summary: SessionRowLike): boolean {
+  const brand = (summary as { [PROJECTED_ROW]?: unknown })[PROJECTED_ROW]
+  return typeof brand === 'boolean' ? brand : summary.blank === true
+}
+
+/**
+ * Overlay title of one draft: live preview, then pinned title, then stock.
+ * A `title` this projection wrote itself is not a user rename — the brand
+ * strips it so the live preview keeps winning over our own stale output.
+ */
 export function draftTitleOf(
   summary: SessionRowLike,
   previews: ReadonlyMap<string, string>,
   fallbackTitle: string,
 ): string {
-  if (summary.title !== undefined) return summary.displayTitle ?? fallbackTitle
+  const pinned = summary.title !== undefined
+    && (summary as { [PROJECTED_ROW]?: unknown })[PROJECTED_ROW] !== true
+  if (pinned) return summary.displayTitle ?? fallbackTitle
   return previews.get(summary.id) ?? fallbackTitle
 }
 
@@ -234,12 +330,16 @@ export function draftTitleOf(
  * Project the STOCK session-list snapshot into the drafts view: every blank
  * non-subagent session becomes a first-class row (`blank: false`) carrying
  * its draft title, so the stock tree renders it — under its workspace, with
- * the creation-time cell and the × discard affordance (the stock ⋯ menu is
- * muted for drafts — Rename/Fork/Archive are chat verbs). Subagent
- * blanks keep their flag (stock hides them by design); rows that need no
- * change keep their object identity, and when nothing changes the SNAPSHOT
- * reference is returned untouched — getSnapshot must stay referentially
- * stable between mutations or every uSES reader re-renders forever.
+ * the creation-time cell and the × discard affordance (the stock ⋯ menu and
+ * the row archive/pin buttons are muted for drafts — chat verbs). The title
+ * is written to BOTH faces the tree consumes: `title` — the renderer's row
+ * label since the 0.2 refactor (`node.title || t('session.untitled')`;
+ * without it every draft row reads "Untitled") — and `displayTitle`, the
+ * archive-confirm and hover-copy projection. Subagent blanks keep their
+ * flag (stock hides them by design); rows that need no change keep their
+ * object identity, and when nothing changes the SNAPSHOT reference is
+ * returned untouched — getSnapshot must stay referentially stable between
+ * mutations or every uSES reader re-renders forever.
  */
 export function projectDraftList<T extends SessionListLike>(
   stock: T,
@@ -251,7 +351,14 @@ export function projectDraftList<T extends SessionListLike>(
   for (const id of stock.ids) {
     const summary = stock.byId[id]
     if (summary === undefined || !isDraft(summary)) continue
-    byId[id] = { ...summary, blank: false, displayTitle: draftTitleOf(summary, previews, fallbackTitle) }
+    const title = draftTitleOf(summary, previews, fallbackTitle)
+    byId[id] = {
+      ...summary,
+      blank: false,
+      title,
+      displayTitle: title,
+      [PROJECTED_ROW]: originalBlankOf(summary),
+    } as SessionRowLike
     changed = true
   }
   // Referential stability: no projectable drafts — pass the stock snapshot
@@ -436,28 +543,12 @@ function schedulePersist(registry: DraftRegistry): void {
 // New Session patch: reuse the empty draft, mint only when all are occupied.
 // ---------------------------------------------------------------------------
 
-/** Instance marker making the patches idempotent across HMR generations. */
-const START_SESSION_PATCH = Symbol.for('@ne-ilyxa/dsh-session-drafts/startSession')
+/** Instance marker making the patch idempotent across HMR generations. */
+const CONNECT_PATCH = Symbol.for('@ne-ilyxa/dsh-session-drafts/connect')
 
-type PatchedWorkspaces = Omit<WorkspacesLike, 'startSession' | 'connectWorkspace'> & {
-  startSession?: (workspaceId?: string) => void
+type PatchedUiWorkspace = Omit<UiWorkspaceLike, 'connectWorkspace'> & {
   connectWorkspace?: (workspaceId: string) => Promise<string>
-  [START_SESSION_PATCH]?: {
-    startSession: { original: (workspaceId?: string) => void; patched: (workspaceId?: string) => void }
-    connectWorkspace: { original: (workspaceId: string) => Promise<string>; patched: (workspaceId: string) => Promise<string> }
-  }
-}
-
-/** Resolve the New Session target exactly like the stock policy (minus reuse). */
-export function resolveTargetWorkspaceId(
-  workspaces: WorkspaceListLike,
-  sessions: SessionListLike,
-): string | undefined {
-  const current = sessions.current
-  const currentWorkspaceId = current === undefined
-    ? undefined
-    : workspaces.items.find(item => item.sessionIds.includes(current))?.workspaceId
-  return currentWorkspaceId ?? workspaces.recentWorkspaceId
+  [CONNECT_PATCH]?: { original: (workspaceId: string) => Promise<string>; patched: (workspaceId: string) => Promise<string> }
 }
 
 /**
@@ -467,9 +558,10 @@ export function resolveTargetWorkspaceId(
  * ({@link DraftRegistry.previews}, kept in sync with the input shells and
  * persisted across reloads). Occupied drafts (typed text) are skipped: they
  * stay put as their own chats and the click mints a fresh one — the Cursor
- * rule that empty placeholders never stack. Membership follows the host's
- * own account (sessionIds), the stock reuse guards apply (same cwd when both
- * are known, never an archived session), and subagent blanks are ignored as
+ * rule that empty placeholders never stack. Draft membership follows
+ * {@link isDraft} (never-engaged placeholders and opened-but-never-prompted
+ * sessions alike), the stock reuse guards apply (same cwd when both are
+ * known, never an archived session), and subagent blanks are ignored as
  * everywhere in this plugin. Newest first, id as the deterministic tiebreak.
  */
 export function findReusableEmptyDraft(
@@ -485,7 +577,7 @@ export function findReusableEmptyDraft(
   let best: SessionRowLike | undefined
   for (const id of stock.ids) {
     const summary = stock.byId[id]
-    if (summary === undefined || !summary.blank || summary.origin === 'subagent') continue
+    if (summary === undefined || !isDraft(summary)) continue
     if (!members.has(summary.id) || archived.has(summary.id)) continue
     // Same cwd guard as the stock reuse scan, applied whenever the account
     // knows its path: a mismatch (or an absent cwd) means the session was
@@ -500,128 +592,106 @@ export function findReusableEmptyDraft(
 }
 
 /**
- * Patch one live WorkspaceRuntime instance with the Cursor New Session rule:
- * **never stack empty drafts** — on EVERY mint path, not just the button.
+ * Patch the live uiWorkspace navigation instance with the Cursor New Session
+ * rule: **never stack empty drafts** — on EVERY mint path, not just the
+ * button.
  *
- * `connectWorkspace` is the funnel the stock runtime uses for all of them
- * (stock `startSession`, the boot initial selection, the hero workspace
- * picker), so THAT is the seat the rule patches: connect first looks for the
- * workspace's existing EMPTY draft (no unsent composer text — see
- * {@link findReusableEmptyDraft}) and resolves it; only when every draft is
- * occupied does it fall through to the stock connect, which mints a fresh
- * durable session (`session.create` persists the Session entity host-side).
- * The mint path stays the stock method on purpose: its per-workspace
- * in-flight dedupe map collapses a rapid double-click into ONE mint. The
- * patched `startSession` just resolves the target Workspace (stock policy:
- * explicit → current Session's workspace → recent; clear the selection when
- * none exists) and routes through the patched connect + open. The stock
- * method, by contrast, reused the workspace's blank session regardless of
- * typed text — one empty chat per workspace, silently discarding the draft
- * you were writing — while the v0.3 button-only patch still let the boot and
- * picker paths stack empties.
+ * Since the 0.2 harness refactor the mint flow lives on `ctx.uiWorkspace`
+ * (`startSession` → `openWorkspace` → `connectWorkspace`; the boot initial
+ * selection and the hero workspace picker also call `connectWorkspace`
+ * directly), so THAT method is the seat the rule patches: connect first
+ * looks for the workspace's existing EMPTY draft (no unsent composer text —
+ * see {@link findReusableEmptyDraft}) and adopts it through the stock
+ * create handshake (`session.create` with the preallocated id, the same
+ * path the stock reuse takes); only when every draft is occupied does it
+ * mint a fresh durable session through `session.create`. The stock method
+ * is replaced — not wrapped — on purpose: its blank-reuse scan reuses the
+ * workspace's blank regardless of typed text (one empty chat per workspace,
+ * silently discarding the draft you were writing), so falling through to it
+ * would betray the rule exactly when drafts are occupied. The per-workspace
+ * in-flight dedupe the stock method owned lives on in the patch (a rapid
+ * double-click collapses into ONE connect), and a `session/writer-held`
+ * refusal of the adoption — a racing tab, a racing second click — falls
+ * through to the fresh mint, mirroring the stock reuse fallback.
  *
  * The reuse scan reads the STOCK list snapshot: the public `getSnapshot` is
  * shadowed by the draft projection once {@link installDraftProjection} is
  * live (blank drafts carry `blank: false` there and would be invisible to
  * the scan), so the registry's stock seat is preferred with the public face
  * as the pre-install fallback.
- * @returns disposer restoring both stock methods (no-op when unsupported;
- * `connectWorkspace` alone missing degrades to the startSession-only rule).
+ * @returns disposer restoring the stock connect (no-op when unsupported).
  */
-export function installFreshSessions(deps: { workspaces: WorkspacesLike; sessions: SessionsLike }): () => void {
-  const { workspaces, sessions } = deps
-  if (typeof workspaces.startSession !== 'function' || typeof sessions.create !== 'function') {
+export function installFreshSessions(deps: {
+  workspaces: WorkspacesLike
+  sessions: SessionsLike
+  uiWorkspace?: UiWorkspaceLike | undefined
+}): () => void {
+  const { workspaces, sessions, uiWorkspace } = deps
+  if (uiWorkspace === undefined
+    || typeof uiWorkspace.connectWorkspace !== 'function'
+    || typeof sessions.create !== 'function') {
     console.warn('[session-drafts] runtime shape unsupported — New Session left stock')
     return () => {}
   }
-  const target = workspaces as PatchedWorkspaces
-  if (target[START_SESSION_PATCH] !== undefined) return () => {}
   const registry = draftRegistry()
+  const target = uiWorkspace as PatchedUiWorkspace
+  if (target[CONNECT_PATCH] !== undefined) return () => {}
   const stockSnapshot = (): SessionListLike =>
     registry.stockGet !== undefined ? registry.stockGet() : sessions.list.getSnapshot()
+  const wasOwn = Object.hasOwn(target, 'connectWorkspace')
+  const stockConnect = target.connectWorkspace!.bind(target)
+  /** Whether a create failure is the stock structured 'writer held' refusal. */
+  const writerHeld = (error: unknown): boolean =>
+    typeof error === 'object' && error !== null
+    && (error as { rpcError?: { code?: unknown } }).rpcError?.code === 'session/writer-held'
 
-  /** The shared empty-draft rule over the stock snapshot. */
-  const reusableOf = (workspaceId: string): SessionRowLike | undefined =>
-    findReusableEmptyDraft(stockSnapshot(), workspaces.list.getSnapshot(), registry.previews, workspaceId)
-
-  // ------------------------------------------------------------------ connect
-  const stockConnect = typeof target.connectWorkspace === 'function' ? target.connectWorkspace.bind(target) : undefined
-  let patchedConnect: ((workspaceId: string) => Promise<string>) | undefined
-  let restoreConnect: (() => void) | undefined
-  if (stockConnect !== undefined) {
-    const wasOwnConnect = Object.hasOwn(target, 'connectWorkspace')
-    patchedConnect = (workspaceId: string): Promise<string> => {
-      const reusable = reusableOf(workspaceId)
-      if (reusable !== undefined) return Promise.resolve(reusable.id)
-      return stockConnect(workspaceId)
+  /** The shared rule over the stock snapshot: adopt the empty draft or mint. */
+  const connectOnce = async (workspaceId: string): Promise<string> => {
+    const reusable = findReusableEmptyDraft(stockSnapshot(), workspaces.list.getSnapshot(), registry.previews, workspaceId)
+    if (reusable !== undefined) {
+      // A resident (engaged) draft is addressable as-is: the caller retains
+      // the identity directly. A never-engaged placeholder goes through the
+      // stock adoption handshake — create with the draft's id keeps the
+      // host writer bookkeeping consistent with the reuse — and a held
+      // writer (a racing second click, another tab) falls through to the
+      // fresh mint below, exactly like the stock reuse fallback. The
+      // original blank bit is face-independent (projected rows carry it in
+      // the brand).
+      if (!originalBlankOf(reusable)) return reusable.id
+      try {
+        return await sessions.create({ workspaceId, sessionId: reusable.id })
+      } catch (error: unknown) {
+        if (!writerHeld(error)) throw error
+      }
     }
-    restoreConnect = (): void => {
-      if (target[START_SESSION_PATCH]?.connectWorkspace.patched !== target.connectWorkspace) return
-      if (wasOwnConnect) target.connectWorkspace = stockConnect
-      else delete target.connectWorkspace
-    }
+    // No EMPTY draft: occupied placeholders stay put as their own chats (the
+    // stock scan would have reused one regardless of its unsent text), so a
+    // fresh durable session is minted.
+    return sessions.create({ workspaceId })
   }
 
-  // ------------------------------------------------------------------ start
-  const wasOwn = Object.hasOwn(target, 'startSession')
-  const original = workspaces.startSession.bind(workspaces)
-  const patched = (workspaceId?: string): void => {
-    try {
-      const resolved = workspaceId
-        ?? resolveTargetWorkspaceId(workspaces.list.getSnapshot(), sessions.list.getSnapshot())
-      if (resolved === undefined) {
-        sessions.clear()
-        return
-      }
-      const connect = patchedConnect ?? (typeof target.connectWorkspace === 'function'
-        ? target.connectWorkspace.bind(target)
-        : undefined)
-      if (connect !== undefined) {
-        void connect(resolved).then(
-          (sessionId) => { sessions.open(sessionId) },
-          (reason: unknown) => {
-            console.warn('[session-drafts] new session failed, falling back:', reason)
-            original(workspaceId)
-          },
-        )
-        return
-      }
-      // No connectWorkspace on this runtime shape: the direct v0.3 path.
-      const reusable = reusableOf(resolved)
-      if (reusable !== undefined) {
-        sessions.open(reusable.id)
-        return
-      }
-      void sessions.create({ workspaceId: resolved }).then(
-        (sessionId) => { sessions.open(sessionId) },
-        (reason: unknown) => {
-          console.warn('[session-drafts] new session failed, falling back:', reason)
-          original(workspaceId)
-        },
-      )
-    } catch (error: unknown) {
-      console.warn('[session-drafts] new session threw, falling back:', error)
-      original(workspaceId)
-    }
+  // Per-workspace in-flight dedupe: the stock `connecting` map lives inside
+  // the method this patch replaces, so the patch owns one — a rapid double-
+  // click collapses into ONE connect on the SAME promise.
+  const connecting = new Map<string, Promise<string>>()
+  const patchedConnect = (workspaceId: string): Promise<string> => {
+    const pending = connecting.get(workspaceId)
+    if (pending !== undefined) return pending
+    const attempt = connectOnce(workspaceId).finally(() => { connecting.delete(workspaceId) })
+    connecting.set(workspaceId, attempt)
+    return attempt
   }
-  target[START_SESSION_PATCH] = {
-    startSession: { original, patched },
-    connectWorkspace: {
-      original: stockConnect ?? ((): Promise<string> => Promise.reject(new Error('no stock connect'))),
-      patched: patchedConnect ?? ((): Promise<string> => Promise.reject(new Error('no stock connect'))),
-    },
-  }
-  target.startSession = patched
-  if (patchedConnect !== undefined) target.connectWorkspace = patchedConnect
+
+  target[CONNECT_PATCH] = { original: stockConnect, patched: patchedConnect }
+  target.connectWorkspace = patchedConnect
   return () => {
-    const record = target[START_SESSION_PATCH]
-    if (record === undefined || record.startSession.patched !== target.startSession) return
+    const record = target[CONNECT_PATCH]
+    if (record === undefined || record.patched !== target.connectWorkspace) return
     // Own-property methods restore by assignment; prototype methods by
     // deleting the shadow so the prototype shows through again.
-    if (wasOwn) target.startSession = record.startSession.original
-    else delete target.startSession
-    restoreConnect?.()
-    delete target[START_SESSION_PATCH]
+    if (wasOwn) target.connectWorkspace = record.original
+    else delete target.connectWorkspace
+    delete target[CONNECT_PATCH]
   }
 }
 
@@ -636,6 +706,8 @@ const LIST_OVERLAY_PATCH = Symbol.for('@ne-ilyxa/dsh-session-drafts/list-overlay
 type PatchableStore = Omit<SnapshotStoreLike<SessionListLike>, 'getSnapshot' | 'subscribe'> & {
   getSnapshot?: () => SessionListLike
   subscribe?: (fn: () => void) => () => void
+  /** Wholesale replace (createSnapshotStore products); absent in odd shapes. */
+  set?: (next: SessionListLike) => void
   [LIST_OVERLAY_PATCH]?: { getSnapshot: () => SessionListLike; subscribe: (fn: () => void) => () => void }
 }
 
@@ -738,10 +810,31 @@ export function installDraftProjection(deps: {
       archived === undefined ? undefined : new Set(archived),
     )
   }
+  /**
+   * Wake the RAW store face. Since 0.2 the renderer's uSES bridge binds the
+   * store before profile plugins apply, so its subscription sits on the raw
+   * `subscribe` and overlay-only changes — a preview typed into a draft
+   * changes no host state — never reach it through the registry's own
+   * listener set. A fresh-identity copy of the same state notifies every raw
+   * subscriber; they re-read through the shadowed `getSnapshot` and see the
+   * new projection. The copy carries the raw truth unchanged, so this is a
+   * notification, not a write: the next host projection replaces the state
+   * wholesale.
+   */
+  const wakeRaw = (): void => {
+    try {
+      const raw = registry.stockGet?.()
+      if (raw !== undefined && typeof store.set === 'function') store.set({ ...raw })
+    } catch {
+      // A store that refuses foreign writes keeps working stock; only the
+      // live-preview keystroke latency degrades to the next host update.
+    }
+  }
   /** Overlay data changed: bump, retitle, wake engines and the marker. */
   const emit = (): void => {
     registry.version += 1
     retitle()
+    wakeRaw()
     for (const fn of [...registry.listeners]) fn()
     registry.rescan?.()
   }
@@ -797,13 +890,17 @@ export function installDraftProjection(deps: {
       if (inputOffs.has(id)) continue
       // Subscribe the CURRENT session only: typing happens in the open
       // conversation, so a non-current draft's text cannot change — its
-      // mirror copy is frozen and refreshes the next time it opens. This is
-      // also a hard safety rule: `sessions.scope(id)` RESOLVES LAZILY (it
-      // mints a scope for any listed session) and `conversation.input.for`
-      // then mints a fresh EMPTY input shell — whose '' draft would delete
-      // the persisted preview of a draft we merely looked at. That exact
-      // sequence wiped the restored map on every reload until it was pinned.
-      if (id !== snapshot.current) continue
+      // mirror copy is frozen and refreshes the next time it opens. The
+      // current session is the main-view-retained row ({@link mainSessionIdOf};
+      // the snapshot's own `current` field is gone in the 0.2 face). This is
+      // also a hard safety rule: `conversation.input.for(scope)` on a scope
+      // we merely looked at mints a fresh EMPTY input shell — whose '' draft
+      // would delete the persisted preview of a draft we merely looked at.
+      // That exact sequence wiped the restored map on every reload until it
+      // was pinned. (Since 0.2 `sessions.scope()` only reads back an already
+      // retained scope — undefined otherwise — so the guard now double-serves
+      // as the "not staged yet" check.)
+      if (id !== mainSessionIdOf(snapshot)) continue
       try {
         const scope = sessions.scope?.(id)
         if (scope === undefined) continue // not staged yet: no shell to read
@@ -900,8 +997,17 @@ function reactFiberOf(node: Element): unknown {
   return key === undefined ? undefined : (node as unknown as Record<string, unknown>)[key]
 }
 
-/** The row's Session id through its React fiber (undefined on any drift). */
+/** The row's Session id through its explicit DOM key or its React fiber. */
 function rowSessionId(row: Element): string | undefined {
+  // The 0.2-era renderer stamps every session row with `data-row-key="
+  // session:<id>"` (workspace headers use other prefixes; exit-animation
+  // clones have the attribute stripped). It is the primary, fiber-free
+  // address; the walk below stays as the fallback for shapes without it.
+  const key = row.getAttribute('data-row-key')
+  if (key !== null && key.startsWith('session:')) {
+    const id = key.slice('session:'.length)
+    if (id !== '') return id
+  }
   try {
     return findSessionId(reactFiberOf(row))
   } catch {
@@ -999,13 +1105,17 @@ export function installDraftMarker(deps: {
         }
         continue
       }
-      // The first button inside a session row is the ⋯ menu trigger (the
-      // only in-row button; search-result rows carry none — nothing to swap
-      // there, they keep their stock affordance).
+      // Every stock button inside a session row is a chat verb — the ⋯ menu
+      // (Rename/Fork/Archive) and, since 0.2, the row-level archive/pin
+      // buttons. A draft is a placeholder: all of them are muted and the
+      // single × takes the trailing action cell (the ⋯'s hover seat).
+      // Search-result rows carry no in-row buttons — nothing to swap there.
       const trigger = row.querySelector<HTMLButtonElement>('button')
       const seat = trigger?.parentElement ?? null
       if (trigger === null || seat === null) continue
-      trigger.setAttribute(MUTE_ATTR, '')
+      for (const stock of Array.from(row.querySelectorAll('button'))) {
+        if (!stock.hasAttribute(DISCARD_ATTR)) stock.setAttribute(MUTE_ATTR, '')
+      }
       let discard = seat.querySelector<HTMLButtonElement>(`button[${DISCARD_ATTR}]`)
       if (discard === null) {
         discard = document.createElement('button')
@@ -1059,7 +1169,7 @@ export function installDraftMarker(deps: {
 // ---------------------------------------------------------------------------
 
 /** Required services (cordis fiber inject). */
-export const inject = ['sessions', 'workspaces', 'conversation', 'locale']
+export const inject = ['sessions', 'workspaces', 'conversation', 'locale', 'uiWorkspace']
 
 /** Shared stylesheet, guarded by a stable data attribute across HMR loads. */
 const STYLE_ID = '@ne-ilyxa/dsh-session-drafts'
@@ -1068,15 +1178,19 @@ const STYLE_ID = '@ne-ilyxa/dsh-session-drafts'
  * Draft row identity + affordance. The stock tree gives every row a 16px
  * status slot; a draft's slot is empty (no activity), so the pencil lands
  * there without shifting the layout — and in the flat list (no slot) the row
- * keeps just the gray title. A draft is a placeholder, not a chat: the ⋯
- * menu trigger is muted (`data-dsd-muted`) and the injected ×
- * (`data-dsd-discard`) takes its seat — the stock hover rule of the trailing
- * action cell shows/hides it exactly like the ⋯, at the ⋯'s own 16px
- * metrics and gray. Colors ride the theme-aware design tokens: dark theme
+ * keeps just the gray title. A draft is a placeholder, not a chat: every
+ * stock button in the row (⋯ menu, row archive/pin) is muted
+ * (`data-dsd-muted`) and the injected × (`data-dsd-discard`) takes the
+ * trailing action cell — the stock hover rule shows/hides it exactly like
+ * the ⋯, at the ⋯'s own 16px metrics and gray. The gray title targets the
+ * second cell (the title span, `span:nth-child(2)`) explicitly: since the
+ * 0.2 refactor the stock `.sessionRow .title` rule carries its own explicit
+ * color, so a color on the row element alone is overridden and the tint
+ * would never show. Colors ride the theme-aware design tokens: dark theme
  * reads as gray-next-to-white, light theme as muted-next-to-black.
  */
 const styles = `
-[role="treeitem"].dsd-draft-row{color:var(--dsw-alias-label-secondary)}
+[role="treeitem"].dsd-draft-row,[role="treeitem"].dsd-draft-row>span:nth-child(2){color:var(--dsw-alias-label-secondary)}
 [role="treeitem"].dsd-draft-row>span:first-child:empty::after{content:"";display:block;width:14px;height:14px;background-color:var(--dsw-alias-label-tertiary);-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M11.3 2.7a1.7 1.7 0 0 1 2.4 2.4L5.2 13.6l-3.2.8.8-3.2z' fill='none' stroke='%23000' stroke-width='1.4' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E") center/12px 12px no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M11.3 2.7a1.7 1.7 0 0 1 2.4 2.4L5.2 13.6l-3.2.8.8-3.2z' fill='none' stroke='%23000' stroke-width='1.4' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E") center/12px 12px no-repeat}
 [role="treeitem"] button[data-dsd-muted]{display:none!important}
 [role="treeitem"] button[data-dsd-discard]{flex:none;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border:none;border-radius:4px;padding:0;background:transparent;cursor:pointer;color:var(--dsw-alias-label-tertiary)}
@@ -1118,7 +1232,13 @@ export function apply(ctx: ClientContextLike): void {
 
   ctx.effect(() => ctx.locale.register(NS, { en: en as unknown as Record<string, string>, zh: zh as unknown as Record<string, string> }), 'session-drafts: dictionaries')
 
-  ctx.effect(() => installFreshSessions({ workspaces: ctx.workspaces, sessions: ctx.sessions }), 'session-drafts: fresh New Session')
+  ctx.effect(() => installFreshSessions({
+    workspaces: ctx.workspaces,
+    sessions: ctx.sessions,
+    // The 0.2 navigation service owns the mint flow (absent on 0.1-era
+    // runtimes — the install degrades loudly to stock).
+    uiWorkspace: ctx.uiWorkspace,
+  }), 'session-drafts: fresh New Session')
 
   ctx.effect(() => {
     // The overlay title needs the active locale's "New Session"; bind is
@@ -1153,7 +1273,12 @@ export function apply(ctx: ClientContextLike): void {
     }
     return installDraftMarker({
       discardLabel: () => text('discard', en.discard),
-      archiveSession: sessionId => ctx.workspaces.archiveSession(sessionId),
+      // uiWorkspace.archiveSession also clears the main selection when the
+      // discarded draft is the open one; the controller archive (0.1 face)
+      // is the fallback.
+      archiveSession: sessionId => ctx.uiWorkspace?.archiveSession !== undefined
+        ? ctx.uiWorkspace.archiveSession(sessionId)
+        : ctx.workspaces.archiveSession(sessionId),
     })
   }, 'session-drafts: draft row marker')
 
@@ -1170,7 +1295,16 @@ export function apply(ctx: ClientContextLike): void {
       if (matchDraftsHotkey(event as unknown as HotkeyEventLike) === null) return
       event.preventDefault()
       event.stopPropagation()
-      ctx.workspaces.startSession()
+      // The mint flow lives on the uiWorkspace navigation service (0.2 face);
+      // it funnels through the patched connectWorkspace — the empty-draft
+      // rule applies. The controller method is the 0.1-era fallback.
+      if (ctx.uiWorkspace !== undefined && typeof ctx.uiWorkspace.startSession === 'function') {
+        ctx.uiWorkspace.startSession()
+      } else if (typeof (ctx.workspaces as { startSession?: unknown }).startSession === 'function') {
+        (ctx.workspaces as unknown as { startSession(): void }).startSession()
+      } else {
+        console.warn('[session-drafts] no startSession on this runtime shape — hotkey ignored')
+      }
     }
     window.addEventListener('keydown', onKey, true)
     return () => { window.removeEventListener('keydown', onKey, true) }

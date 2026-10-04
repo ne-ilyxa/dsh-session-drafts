@@ -5,13 +5,14 @@
 // in headless Chrome, and asserts both the host-side session truth and the
 // sidebar tree DOM. Self-cleaning.
 //
-// Covers the v0.2 contract:
+// Covers the v0.7 contract (verified against harness 0.2.0-rc.2):
 //   - every New Session click (button / folder ＋ / Ctrl+Alt+N) mints a fresh
 //     durable draft; drafts render as ordinary tree rows (marked, gray,
 //     "New Session" title, creation-time cell) — no popover anywhere;
 //   - typing in a draft updates its row title live (unsent-text preview) and
 //     survives a page reload (localStorage mirror; sessions survive the host);
-//   - the stock row menu archives (= discards) a draft.
+//   - draft rows carry only the × discard (stock ⋯ menu and row archive/pin
+//     buttons are muted).
 //
 // Requirements (skipped with exit 0 when unset — CI runs only unit tests):
 //   E2E_DSH_ROOT  path to a deepseek-harness checkout (default: /home/ilya/deepseek-harness)
@@ -80,24 +81,46 @@ try {
     }
   }
 
-  // 2. Boot the scratch host. stdio ignore: a pipe nobody drains fills its
-  // 64KB buffer and silently wedges the host mid-boot. detached: own process
-  // group, so teardown kills the whole tree (pnpm -> dsh -> server).
-  host = spawn('pnpm', ['dsh', 'web', '--no-open', '--port', String(PORT)], {
-    cwd: DSH_ROOT,
-    env: { ...process.env, ...env },
-    stdio: 'ignore',
-    detached: true,
-  })
+  // 2. Boot the scratch host. stdout/stderr are PIPED AND DRAINED: since the
+  // 0.2 harness the web surface is token-gated and the grant URL (`dsh web:
+  // ...?token=...`) is printed on stdout — the page must open WITH it (the
+  // token exchange sets the session cookie the page's /api calls ride on).
+  // Draining keeps the 64KB pipe buffer from wedging the host; detached:
+  // own process group, so teardown kills the whole tree (pnpm -> dsh -> server).
+  let hostLog = ''
+  const bootHost = () => {
+    hostLog = ''
+    const child = spawn('pnpm', ['dsh', 'web', '--no-open', '--port', String(PORT)], {
+      cwd: DSH_ROOT,
+      env: { ...process.env, DSH_HOME: home },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    })
+    for (const stream of [child.stdout, child.stderr]) {
+      stream.on('data', (chunk) => {
+        hostLog += chunk
+        if (hostLog.length > 40_000) hostLog = hostLog.slice(-20_000)
+      })
+    }
+    return child
+  }
+  /** The auth token of the boot line, once the host announces readiness. */
+  const bootToken = () => {
+    const match = /dsh web: \S*[?&]token=([A-Za-z0-9_-]+)/u.exec(hostLog)
+    return match?.[1]
+  }
+  host = bootHost()
   let up = false
-  for (let i = 0; i < 40 && !up; i++) {
+  for (let i = 0; i < 90 && !up; i++) {
     await sleep(500)
     try {
+      // 401 before the token exchange is a healthy server answering.
       const res = await fetch(`${BASE}/`, { signal: AbortSignal.timeout(1500) })
-      up = res.ok
+      up = bootToken() !== undefined && res.status < 500
     } catch { /* not yet */ }
   }
-  if (!up) throw new Error('scratch DSH host did not come up')
+  if (!up) throw new Error(`scratch DSH host did not come up; log tail:\n${hostLog.slice(-1500)}`)
+  const token = bootToken()
 
   const browser = await puppeteer.launch({
     executablePath: CHROME,
@@ -111,16 +134,24 @@ try {
     page.on('pageerror', e => problems.push(String(e)))
     page.on('console', m => { if (m.type() === 'error') problems.push(m.text()) })
 
-    const rpc = (method, payload) => page.evaluate(async ({ method, payload }) => {
-      const res = await fetch(`/api/${method}`, {
+    // Since 0.2 the wire endpoints are `namespace/method` ('session/list'),
+    // not the dotted 0.1 names, and the payload wraps the call arguments in
+    // an `args` field.
+    const rpc = (endpoint, args) => page.evaluate(async ({ endpoint, args }) => {
+      const res = await fetch(`/api/${endpoint}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ type: 'client-request', rpcId: `r${Math.random()}`, method, payload }),
+        body: JSON.stringify({
+          type: 'client-request',
+          rpcId: `r${Math.random()}`,
+          method: endpoint,
+          payload: { args },
+        }),
       })
       return res.ok ? await res.json().catch(() => null) : null
-    }, { method, payload })
+    }, { endpoint, args })
     const hostBlanks = async () => {
-      const r = await rpc('session.list', {})
+      const r = await rpc('session/list', { _request: {} })
       return (r?.result?.value?.items ?? []).filter(s => s.blank).length
     }
 
@@ -135,18 +166,19 @@ try {
         text: row.textContent ?? '',
         selected: row.getAttribute('aria-selected') === 'true',
       })))
-    const typeDraft = text => page.evaluate(t => {
-      const area = document.querySelector('textarea[data-phase]')
-      if (area === null) throw new Error('no composer textarea')
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
-      area.focus()
-      setter?.call(area, t)
-      area.dispatchEvent(new Event('input', { bubbles: true }))
-    }, text)
+    // The 0.2 composer is a Lexical contentEditable (the 0.1 textarea is
+    // gone) — typing goes through real keyboard events, the input path the
+    // editor itself observes.
+    const typeDraft = async (text) => {
+      const area = await page.$('div[contenteditable="true"][data-phase]')
+      if (area === null) throw new Error('no composer contenteditable')
+      await area.click()
+      await page.keyboard.type(text, { delay: 12 })
+    }
 
-    await page.goto(BASE, { waitUntil: 'networkidle2', timeout: 60_000 })
+    await page.goto(`${BASE}/?token=${token}`, { waitUntil: 'networkidle2', timeout: 60_000 })
     await sleep(2500)
-    const ws = await rpc('workspace.create', { path: tmpdir() })
+    const ws = await rpc('workspace/create', { request: { path: tmpdir() } })
     if (ws?.result?.ok !== true) fail('workspace.create failed')
     await page.reload({ waitUntil: 'networkidle2' })
     await sleep(3000)
@@ -266,14 +298,18 @@ try {
     if ((await hostBlanks()) !== base + 3) fail('Ctrl+Alt+N minted while an EMPTY draft existed')
     if ((await draftRows()).length !== base + 3) fail('hotkey drafts not visible in tree')
 
-    // --- Draft affordance: NO ⋯ menu (Rename/Fork/Archive are chat verbs —
-    // a draft is a placeholder); the only trailing control is the × discard
-    // button, riding the same hover cell at the ⋯'s metrics.
+    // --- Draft affordance: NO stock row controls (the ⋯ menu and, since
+    // 0.2, the row-level archive/pin buttons are chat verbs — a draft is a
+    // placeholder); the only trailing control is the × discard button,
+    // riding the same hover cell at the ⋯'s metrics.
     const affordance = await page.evaluate(() =>
       [...document.querySelectorAll('[role="treeitem"].dsd-draft-row')].map(row => {
         const ell = row.querySelector('button[aria-label^="Session actions for"]')
+        const stockButtons = [...row.querySelectorAll('button')]
+          .filter(b => !b.hasAttribute('data-dsd-discard'))
         return {
           menuHidden: ell === null || getComputedStyle(ell).display === 'none',
+          stockHidden: stockButtons.every(b => getComputedStyle(b).display === 'none'),
           hasX: row.querySelector('button[data-dsd-discard]') !== null,
         }
       }))
@@ -281,7 +317,26 @@ try {
     if (affordance.length === 0 || !affordance.every(a => a.menuHidden)) {
       fail('draft rows still expose the stock ⋯ menu')
     }
+    if (!affordance.every(a => a.stockHidden)) fail('draft rows still expose stock row-action buttons')
     if (!affordance.every(a => a.hasX)) fail('draft rows missing the × discard button')
+
+    // --- Gray tint: the title cell of a draft row resolves to the secondary
+    // label token — never the primary every ordinary row carries (the 0.2
+    // stock `.sessionRow .title` rule paints titles explicitly, so the tint
+    // must win on the span itself).
+    const tint = await page.evaluate(() => {
+      const draftTitle = document.querySelector('[role="treeitem"].dsd-draft-row > span:nth-child(2)')
+      if (draftTitle === null) return null
+      const probe = document.createElement('span')
+      probe.style.color = 'var(--dsw-alias-label-primary)'
+      document.body.appendChild(probe)
+      const primary = getComputedStyle(probe).color
+      probe.remove()
+      return { draft: getComputedStyle(draftTitle).color, primary }
+    })
+    log('draft tint:', JSON.stringify(tint))
+    if (tint === null) fail('draft row has no title cell (DOM shape drifted)')
+    else if (tint.draft === tint.primary) fail('draft title is not tinted gray')
 
     // --- Inverse pin (the C2 class): workspace header rows are treeitems
     // with their own ⋯ (Rename/Delete) — they must NEVER carry the draft
@@ -323,22 +378,17 @@ try {
     const beforeRestart = await draftRows()
     try { process.kill(-host.pid, 'SIGTERM') } catch { /* group already gone */ }
     await sleep(2000)
-    host = spawn('pnpm', ['dsh', 'web', '--no-open', '--port', String(PORT)], {
-      cwd: DSH_ROOT,
-      env: { ...process.env, DSH_HOME: home },
-      stdio: 'ignore',
-      detached: true,
-    })
+    host = bootHost()
     let restarted = false
-    for (let i = 0; i < 40 && !restarted; i++) {
+    for (let i = 0; i < 90 && !restarted; i++) {
       await sleep(500)
       try {
         const res = await fetch(`${BASE}/`, { signal: AbortSignal.timeout(1500) })
-        restarted = res.ok
+        restarted = bootToken() !== undefined && res.status < 500
       } catch { /* not yet */ }
     }
-    if (!restarted) fail('scratch host did not come back up after restart')
-    await page.reload({ waitUntil: 'networkidle2' })
+    if (!restarted) fail(`scratch host did not come back up after restart; log tail:\n${hostLog.slice(-1500)}`)
+    await page.goto(`${BASE}/?token=${bootToken()}`, { waitUntil: 'networkidle2', timeout: 60_000 })
     await sleep(3500)
     // The old page's socket/chunk errors during the kill+restart window are
     // transient by construction; only console output from the SETTLED
